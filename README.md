@@ -34,3 +34,7 @@ python decrypt_batch.py "$env:USERPROFILE\Desktop\CONVERSION IMAGE" "$env:USERPR
 Use an output folder on a drive that supports hard links (such as NTFS). The batch command verifies and writes original JPEG bytes, preserves existing output files and reports failed inputs. For a different client batch, set its authorized key before launching the command.
 
 Scroll the loaded scans list and click a scan to open it. Use the preview scrollbars to see the whole page. Export Excel processes every loaded scan across all selected folders. Scan review lists every input image, including any with read errors or zero matches.
+
+## Local source workbook for Excel export
+
+Keep the original KYC MI workbook beside `app.py` as `KYC_MI_Source.xlsx`. The app loads it automatically when you click **Export Excel**. Output is saved in **Downloads > KYC Exports**. Keep the workbook local because it contains KYC records.
