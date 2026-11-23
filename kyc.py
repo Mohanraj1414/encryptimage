@@ -125,29 +125,31 @@ def read_sheet(path, sheet_name, mapping, header_row=1):
         workbook.close()
 
 
-def export(path, records, scan_report=None, duplicates=()):
+def export(path, records, scan_report=None, duplicates=(), *, scan_ocr=None):
     workbook = Workbook(write_only=True)
-    sheet = workbook.create_sheet("KYC Data")
-    sheet.freeze_panes = "F2"
     from openpyxl.cell import WriteOnlyCell
 
-    for index, field in enumerate(FIELDS, 1):
-        sheet.column_dimensions[get_column_letter(index)].width = max(17, len(field) + 3)
-    sheet.column_dimensions["V"].width = 55
-    titles = []
-    for field in FIELDS:
-        cell = WriteOnlyCell(sheet, value=field)
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill("solid", fgColor="18334B")
-        titles.append(cell)
-    sheet.append(titles)
-    for record in records:
-        row = []
-        for value in normalize(record):
-            cell = WriteOnlyCell(sheet, value=value)
-            cell.data_type = "s"
-            row.append(cell)
-        sheet.append(row)
+    if records is not None:
+        sheet = workbook.create_sheet("KYC Data")
+        sheet.freeze_panes = "F2"
+
+        for index, field in enumerate(FIELDS, 1):
+            sheet.column_dimensions[get_column_letter(index)].width = max(17, len(field) + 3)
+        sheet.column_dimensions["V"].width = 55
+        titles = []
+        for field in FIELDS:
+            cell = WriteOnlyCell(sheet, value=field)
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="18334B")
+            titles.append(cell)
+        sheet.append(titles)
+        for record in records:
+            row = []
+            for value in normalize(record):
+                cell = WriteOnlyCell(sheet, value=value)
+                cell.data_type = "s"
+                row.append(cell)
+            sheet.append(row)
     if scan_report is not None:
         report = workbook.create_sheet("Scan review")
         report.freeze_panes = "A2"
@@ -163,6 +165,32 @@ def export(path, records, scan_report=None, duplicates=()):
                 cell = WriteOnlyCell(repeated, value=identifier)
                 cell.data_type = "s"
                 repeated.append([cell])
+    if scan_ocr is not None:
+        review = workbook.create_sheet("Scan review")
+        review.freeze_panes = "C2"
+        review.column_dimensions["B"].width = 45
+        review.column_dimensions["D"].width = 100
+        review.column_dimensions["E"].width = 58
+        review.append(["Image number", "Source image", "Detected IDs", "OCR text", "Review"])
+        detected = workbook.create_sheet("Detected IDs")
+        detected.freeze_panes = "B2"
+        detected.column_dimensions["B"].width = 45
+        detected.column_dimensions["C"].width = 32
+        detected.append(["Image number", "Source image", "OCR record ID"])
+
+        def text_cell(sheet, value):
+            # OCR and filenames are untrusted text. Keep them out of Excel formulas.
+            from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
+            cell = WriteOnlyCell(sheet, value=ILLEGAL_CHARACTERS_RE.sub("", value))
+            cell.data_type = "s"
+            return cell
+
+        for number, source, ids, text, error in scan_ocr:
+            status = error or ("Review OCR against the image" if ids else "No record IDs detected")
+            review.append([number, text_cell(review, source), len(ids),
+                           text_cell(review, text), text_cell(review, status)])
+            for identifier in ids:
+                detected.append([number, text_cell(detected, source), text_cell(detected, identifier)])
     path = Path(path)
     with NamedTemporaryFile(dir=path.parent, suffix=".xlsx", delete=False) as temporary:
         temporary_path = Path(temporary.name)

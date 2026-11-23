@@ -599,9 +599,27 @@ class Workbench:
     def save_grid(self):
         mi_path = find_mi_workbook(self.images, self.imported_workbook_path, self.source_session_choice)
         if mi_path is None:
-            mi_path = self.choose_mi()
-        if mi_path is not None:
-            self.export_matched_scans(mi_path)
+            if messagebox.askyesno(
+                "KYC MI source workbook",
+                "A single valid KYC MI source could not be located.\n\n"
+                "Select your original KYC MI .xlsx and remember it for future exports?",
+                parent=self.root,
+            ):
+                mi_path = self.choose_mi()
+            if mi_path is None:
+                self.offer_new_workbook()
+                return
+        self.export_matched_scans(mi_path)
+
+    def offer_new_workbook(self):
+        if messagebox.askyesno(
+            "Export Excel",
+            "Export cancelled: no source workbook selected\n\n"
+            "Save as new workbook instead? This reads the loaded scans and saves OCR text and detected record IDs "
+            "without matching scans to source records.",
+            parent=self.root,
+        ):
+            self.export_matched_scans(None)
 
     def export_matched_scans(self, mi_path):
         try:
@@ -613,7 +631,8 @@ class Workbench:
 
         folders = {image.parent for image in self.images}
         batch_name = (self.images[0].parent.name or "Batch") if len(folders) == 1 else "Combined"
-        filename = destination / f"KYC_{batch_name}_{datetime.now():%Y%m%d_%H%M%S_%f}.xlsx"
+        prefix = "KYC" if mi_path is not None else "KYC_OCR"
+        filename = destination / f"{prefix}_{batch_name}_{datetime.now():%Y%m%d_%H%M%S_%f}.xlsx"
         scans = []
         for image in self.images:
             try:
@@ -654,9 +673,10 @@ class Workbench:
                     messagebox.showerror("Export Excel", value)
                 else:
                     rows, flagged = value
+                    row_label = "matched KYC rows" if mi_path is not None else "OCR-detected record IDs"
                     messagebox.showinfo(
                         "Export Excel",
-                        f"Included all {len(scans):,} loaded scans in Scan review and saved {rows:,} matched KYC rows. "
+                        f"Included all {len(scans):,} loaded scans in Scan review and saved {rows:,} {row_label}. "
                         f"{flagged:,} scans need review.\n\nSaved to {filename}\n\n"
                         "Check the Scan review sheet against the original images.",
                     )
