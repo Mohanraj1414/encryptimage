@@ -95,7 +95,8 @@ def find_mi_workbook(images, imported_path, session_choice=None):
 
     # An explicit menu choice is retained for this session if saving failed.
     saved_path = session_choice or read_mi_path()
-    for path in (saved_path, imported_path):
+    app_source = Path(__file__).resolve().with_name("KYC_MI_Source.xlsx")
+    for path in (saved_path, imported_path, app_source):
         if path is not None and is_valid(path):
             return path
 
@@ -598,28 +599,9 @@ class Workbench:
     def save_grid(self):
         mi_path = find_mi_workbook(self.images, self.imported_workbook_path, self.source_session_choice)
         if mi_path is None:
-            if messagebox.askyesno(
-                "KYC MI source workbook",
-                "A single valid KYC MI source could not be located.\n\n"
-                "Select your original KYC MI .xlsx and remember it for future exports?",
-                parent=self.root,
-            ):
-                mi_path = self.choose_mi()
-            if mi_path is None:
-                self.offer_new_workbook()
-                return
-        self.export_matched_scans(mi_path)
-
-    def offer_new_workbook(self):
-        # This uses the existing export for form rows and manual edits.
-        if messagebox.askyesno(
-            "Export Excel",
-            "Export cancelled: no source workbook selected\n\n"
-            "Save as new workbook instead? This saves the currently loaded form rows "
-            "without matching scans to source records.",
-            parent=self.root,
-        ):
-            self.save_reviewed_rows()
+            mi_path = self.choose_mi()
+        if mi_path is not None:
+            self.export_matched_scans(mi_path)
 
     def export_matched_scans(self, mi_path):
         try:

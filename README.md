@@ -12,7 +12,7 @@ Choose **Open image** for one scan or **Open folder** for a batch. To combine ba
 ## Export records from Client 2 grid pages
 
 1. Open your encrypted JPG folder and check that the page preview is readable.
-2. Click **Export Excel**, select the numbered **KYC MI** source workbook, and choose an output file. Local Tesseract OCR is required for this step. Keep it on PATH or in its standard Windows installation folder.
+2. Click **Export Excel**. If the source workbook picker opens, select the original numbered **KYC MI** workbook. Cancelling the picker cancels the export. This step uses local Tesseract OCR or the installed Windows OCR language.
 3. The app reads printed record IDs and uses the matching MI rows to populate the 22 columns, with one row per matched ID on each image. Image Name holds the page number. The **Scan review** sheet lists the source pages, counts and unmatched IDs. Compare against the source pages because OCR may miss or misread IDs.
 
 For manually entered or labeled forms, use **File > Export reviewed form rows**. **Read scan text** can prefill explicitly labeled values, and **Check row** previews remarks.
@@ -37,4 +37,4 @@ Scroll the loaded scans list and click a scan to open it. Use the preview scroll
 
 ## Local source workbook for Excel export
 
-Keep the original KYC MI workbook beside `app.py` as `KYC_MI_Source.xlsx`. The app loads it automatically when you click **Export Excel**. Output is saved in **Downloads > KYC Exports**. Keep the workbook local because it contains KYC records.
+Keep the original KYC MI workbook beside `app.py` as `KYC_MI_Source.xlsx` for automatic discovery. A valid remembered source or a valid workbook imported in the current session takes priority. Use **File > Change source workbook...** to select a different source. Output is saved in **Downloads > KYC Exports**. Keep the workbook local because it contains KYC records.
