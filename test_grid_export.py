@@ -1,0 +1,111 @@
+from pathlib import Path
+from tempfile import TemporaryDirectory
+import unittest
+from unittest.mock import Mock, patch
+
+from openpyxl import Workbook, load_workbook
+
+import app
+from grid_records import MI_FIELDS, MI_HEADERS, export_grid
+from kyc import FIELDS
+
+
+class GridExportTests(unittest.TestCase):
+    def setUp(self):
+        workdir = TemporaryDirectory()
+        self.addCleanup(workdir.cleanup)
+        self.root = Path(workdir.name)
+        self.app_dir = self.root / "app"
+        self.app_dir.mkdir()
+        self.scans = self.root / "batch" / "images"
+        self.scans.mkdir(parents=True)
+        self.scan = self.scans / "HnT_DuP-AkyZ (9001).jpg"
+        app_file = patch.object(app, "__file__", str(self.app_dir / "app.py"))
+        settings = patch.object(app, "mi_settings_path", return_value=self.root / "config.json")
+        legacy_config = patch.dict(app.os.environ, {"LOCALAPPDATA": str(self.root)})
+        for patcher in (app_file, settings, legacy_config):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def make_source(self, path):
+        workbook = Workbook()
+        identifier = "HnT_DuP-AkyZ-2001"
+        record = {"Record No": identifier, "Type Of Account": "Test Account", "Full Name": "SYNTHETIC PERSON"}
+        workbook.active.append(MI_HEADERS)
+        workbook.active.append([identifier, *(record.get(field) for field in MI_FIELDS)])
+        workbook.save(path)
+        workbook.close()
+        return path
+
+    def test_finds_documented_source_beside_app_from_another_folder(self):
+        source = self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
+        self.assertEqual(app.find_mi_workbook([self.scan], None), source)
+
+    def test_explicit_choices_keep_priority_over_app_source(self):
+        self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
+        imported = self.make_source(self.root / "imported.xlsx")
+        saved = self.make_source(self.root / "saved.xlsx")
+        session = self.make_source(self.root / "session.xlsx")
+        self.assertEqual(app.find_mi_workbook([self.scan], imported), imported)
+        app.remember_mi_path(saved)
+        self.assertEqual(app.find_mi_workbook([self.scan], imported), saved)
+        self.assertEqual(app.find_mi_workbook([self.scan], imported, session), session)
+
+    def test_invalid_app_source_falls_back_to_unique_batch_workbook(self):
+        (self.app_dir / "KYC_MI_Source.xlsx").write_text("not Excel", encoding="utf-8")
+        source = self.make_source(self.scans.parent / "KYC MI batch.xlsx")
+        self.assertEqual(app.find_mi_workbook([self.scan], None), source)
+        self.make_source(self.scans / "KYC MI other.xlsx")
+        self.assertIsNone(app.find_mi_workbook([self.scan], None))
+
+    def test_cancelled_source_picker_does_not_export_form_rows(self):
+        workbench = app.Workbench.__new__(app.Workbench)
+        workbench.root = Mock()
+        workbench.images = [self.scan]
+        workbench.imported_workbook_path = None
+        workbench.source_session_choice = None
+        workbench.choose_mi = Mock(return_value=None)
+        workbench.export_matched_scans = Mock()
+        workbench.save_reviewed_rows = Mock()
+        with patch.object(app.messagebox, "askyesno", return_value=True):
+            workbench.save_grid()
+        workbench.choose_mi.assert_called_once()
+        workbench.export_matched_scans.assert_not_called()
+        workbench.save_reviewed_rows.assert_not_called()
+
+    def test_picker_rejects_generated_output_and_remembers_valid_source(self):
+        output = self.root / "generated.xlsx"
+        app.export(output, [{"Record No": self.scan.stem, "Image Name": "1"}])
+        source = self.make_source(self.root / "chosen.xlsx")
+        workbench = Mock()
+        with patch.object(app.filedialog, "askopenfilename", side_effect=[str(output), str(source)]):
+            with patch.object(app.messagebox, "showerror") as showerror:
+                self.assertEqual(app.Workbench.choose_mi(workbench), source)
+        showerror.assert_called_once()
+        self.assertEqual(app.read_mi_path(), source)
+
+    def test_export_matches_printed_ids_and_reports_unmatched_pages(self):
+        source = self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
+        unmatched_scan = self.scans / "HnT_DuP-AkyZ (9002).jpg"
+        output = self.root / "output.xlsx"
+        progress = Mock()
+        payloads = {self.scan: b"HnT_DuP-AkyZ-2001", unmatched_scan: b"HnT_DuP-AkyZ-9999"}
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.scan_bytes", side_effect=lambda path, key: payloads[path]),
+            patch("grid_records.ocr_text", side_effect=lambda engine, payload, mode: payload.decode()),
+        ):
+            result = export_grid(output, [(self.scan, None), (unmatched_scan, None)], source, progress)
+        self.assertEqual(result, (1, 1))
+        self.assertEqual([call.args for call in progress.call_args_list], [(1,), (2,)])
+        workbook = load_workbook(output, read_only=True)
+        self.addCleanup(workbook.close)
+        headers, values = workbook["KYC Data"].values
+        self.assertEqual(headers, FIELDS)
+        self.assertEqual(values[:5], ("HnT_DuP-AkyZ-2001", "Test Account", "N.A", "1", "Synthetic Person"))
+        _, first_page, second_page = workbook["Scan review"].values
+        self.assertEqual((first_page[2], second_page[2], second_page[3]), (1, 0, "HnT_DuP-AkyZ-9999"))
+
+
+if __name__ == "__main__":
+    unittest.main()

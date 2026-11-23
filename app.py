@@ -95,7 +95,8 @@ def find_mi_workbook(images, imported_path, session_choice=None):
 
     # An explicit menu choice is retained for this session if saving failed.
     saved_path = session_choice or read_mi_path()
-    for path in (saved_path, imported_path):
+    app_source = Path(__file__).resolve().with_name("KYC_MI_Source.xlsx")
+    for path in (saved_path, imported_path, app_source):
         if path is not None and is_valid(path):
             return path
 
