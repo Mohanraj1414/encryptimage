@@ -23,6 +23,21 @@ from image_reader import configured_key, legacy_key, load_scan
 from kyc import FIELDS, export, normalize, read_sheet
 
 
+def mi_settings_path():
+    settings_root = Path(os.environ.get("LOCALAPPDATA") or Path.home())
+    return settings_root / "KYC Workbench" / "mi-workbook.txt"
+
+
+def validate_mi_headers(path):
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    try:
+        headers = next(workbook.worksheets[0].values, ())[:len(MI_HEADERS)]
+        if tuple(int(value) if str(value).isdigit() else value for value in headers) != MI_HEADERS:
+            raise ValueError("This file does not have the Client 2 KYC MI source headers.")
+    finally:
+        workbook.close()
+
+
 def find_mi_workbook(images):
     folders = tuple(dict.fromkeys(image.parent.resolve() for image in images))
     configured = os.environ.get("KYC_MI_WORKBOOK")
@@ -31,6 +46,13 @@ def find_mi_workbook(images):
         if not workbook_path.is_file():
             raise ValueError("KYC_MI_WORKBOOK does not point to an existing file.")
         return workbook_path
+
+    try:
+        saved_path = mi_settings_path().read_text(encoding="utf-8").strip()
+    except OSError:
+        saved_path = ""
+    if saved_path and Path(saved_path).is_file():
+        return Path(saved_path)
 
     bundled = Path(__file__).resolve().with_name("KYC_MI_Source.xlsx")
     if bundled.is_file():
@@ -59,13 +81,8 @@ def find_mi_workbook(images):
         valid = []
         for candidate in sorted(matches):
             try:
-                workbook = load_workbook(candidate, read_only=True, data_only=True)
-                try:
-                    headers = next(workbook.worksheets[0].values, ())[:len(MI_HEADERS)]
-                    if tuple(int(v) if str(v).isdigit() else v for v in headers) == MI_HEADERS:
-                        valid.append(candidate)
-                finally:
-                    workbook.close()
+                validate_mi_headers(candidate)
+                valid.append(candidate)
             except (OSError, ValueError, KeyError, IndexError, BadZipFile, InvalidFileException):
                 continue
         if valid:
@@ -526,20 +543,48 @@ class Workbench:
             filetypes=[("Excel workbook", "*.xlsx")],
             parent=self.root,
         )
-        if filename:
-            self.mi_path = Path(filename)
+        if not filename:
+            return None
+        path = Path(filename).resolve()
+        try:
+            validate_mi_headers(path)
+        except (OSError, ValueError, KeyError, IndexError, BadZipFile, InvalidFileException) as error:
+            messagebox.showerror("KYC MI source workbook", str(error), parent=self.root)
+            return None
+
+        self.mi_path = path
+        try:
+            settings = mi_settings_path()
+            settings.parent.mkdir(parents=True, exist_ok=True)
+            settings.write_text(str(path), encoding="utf-8")
+        except OSError:
+            messagebox.showwarning(
+                "KYC MI source workbook",
+                "The workbook will be used for this session. Windows could not save its location.",
+                parent=self.root,
+            )
+        return path
 
     def save_grid(self):
-        try:
-            mi_path = self.mi_path
-            if mi_path is None or not mi_path.is_file():
+        mi_path = self.mi_path
+        if mi_path is None or not mi_path.is_file():
+            try:
                 mi_path = find_mi_workbook(self.images)
+                reason = "The KYC MI source workbook could not be found automatically."
+            except (OSError, ValueError) as error:
+                mi_path = None
+                reason = str(error)
             if mi_path is None:
-                raise ValueError(
-                    "No KYC MI source workbook was found. Put the original .xlsx in the image folder, "
-                    "its parent batch folder, Downloads or the app folder. "
-                    "Then click Export Excel again."
-                )
+                if not messagebox.askyesno(
+                    "KYC MI source workbook",
+                    f"{reason}\n\nSelect your original KYC MI .xlsx once and remember it for future exports?",
+                    parent=self.root,
+                ):
+                    return
+                mi_path = self.choose_mi()
+                if mi_path is None:
+                    return
+        try:
             destination = Path.home() / "Downloads" / "KYC Exports"
             destination.mkdir(parents=True, exist_ok=True)
         except (OSError, ValueError) as error:
