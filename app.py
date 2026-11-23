@@ -32,6 +32,10 @@ def find_mi_workbook(images):
             raise ValueError("KYC_MI_WORKBOOK does not point to an existing file.")
         return workbook_path
 
+    bundled = Path(__file__).resolve().with_name("KYC_MI_Source.xlsx")
+    if bundled.is_file():
+        return bundled
+
     # Prefer the selected folders, then their enclosing batch folders.
     levels = [folders]
     for _ in range(4):
