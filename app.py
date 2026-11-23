@@ -1,5 +1,6 @@
 """Local desktop workbench for reviewing KYC records."""
 from datetime import datetime
+import os
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Thread
@@ -9,6 +10,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 
 from openpyxl import load_workbook
 from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils.exceptions import InvalidFileException
 from PIL import Image, ImageTk
 
 from decrypt_batch import save_jpeg
@@ -23,9 +25,16 @@ from kyc import FIELDS, export, normalize, read_sheet
 
 def find_mi_workbook(images):
     folders = tuple(dict.fromkeys(image.parent.resolve() for image in images))
-    # Prefer the selected folder, then its enclosing batch folders.
+    configured = os.environ.get("KYC_MI_WORKBOOK")
+    if configured:
+        workbook_path = Path(configured).expanduser()
+        if not workbook_path.is_file():
+            raise ValueError("KYC_MI_WORKBOOK does not point to an existing file.")
+        return workbook_path
+
+    # Prefer the selected folders, then their enclosing batch folders.
     levels = [folders]
-    for depth in range(2):
+    for _ in range(4):
         levels.append(tuple(dict.fromkeys(folder.parent for folder in levels[-1])))
     levels.append((Path.home() / "Downloads", Path(__file__).resolve().parent))
 
@@ -39,7 +48,7 @@ def find_mi_workbook(images):
             try:
                 for candidate in folder.iterdir():
                     if (candidate.is_file() and candidate.suffix.lower() == ".xlsx"
-                            and candidate.stem.casefold().startswith("kyc mi")):
+                            and not candidate.name.startswith("~$")):
                         matches.add(candidate.resolve())
             except OSError:
                 continue
@@ -53,10 +62,15 @@ def find_mi_workbook(images):
                         valid.append(candidate)
                 finally:
                     workbook.close()
-            except (OSError, ValueError, KeyError, IndexError, BadZipFile):
+            except (OSError, ValueError, KeyError, IndexError, BadZipFile, InvalidFileException):
                 continue
         if valid:
-            return valid[0] if len(valid) == 1 else None
+            if len(valid) == 1:
+                return valid[0]
+            raise ValueError(
+                "Several valid KYC MI workbooks were found at the same search level. "
+                "Set KYC_MI_WORKBOOK or use File > Choose a different KYC MI workbook."
+            )
     return None
 
 
@@ -512,26 +526,25 @@ class Workbench:
             self.mi_path = Path(filename)
 
     def save_grid(self):
-        mi_path = self.mi_path
-        if mi_path is None or not mi_path.is_file():
-            mi_path = find_mi_workbook(self.images)
+        try:
+            mi_path = self.mi_path
+            if mi_path is None or not mi_path.is_file():
+                mi_path = find_mi_workbook(self.images)
             if mi_path is None:
-                self.choose_mi()
-                mi_path = self.mi_path
-                if mi_path is None or not mi_path.is_file():
-                    return
-        batch_name = self.images[0].parent.name if len({image.parent for image in self.images}) == 1 else "Combined"
-        filename = filedialog.asksaveasfilename(
-            title=f"Save Excel using {mi_path.name}",
-            defaultextension=".xlsx",
-            initialfile=f"KYC_{batch_name}_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
-            filetypes=[("Excel workbook", "*.xlsx")], parent=self.root,
-        )
-        if not filename:
+                raise ValueError(
+                    "No KYC MI source workbook was found. Put the original .xlsx in the image folder, "
+                    "its parent batch folder, Downloads or the app folder. "
+                    "Then click Export Excel again."
+                )
+            destination = Path.home() / "Downloads" / "KYC Exports"
+            destination.mkdir(parents=True, exist_ok=True)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Export Excel", str(error))
             return
-        if Path(filename).resolve() == mi_path.resolve():
-            messagebox.showerror("Export Excel", "Choose a path different from the source KYC MI workbook.")
-            return
+
+        folders = {image.parent for image in self.images}
+        batch_name = (self.images[0].parent.name or "Batch") if len(folders) == 1 else "Combined"
+        filename = destination / f"KYC_{batch_name}_{datetime.now():%Y%m%d_%H%M%S_%f}.xlsx"
         scans = []
         for image in self.images:
             try:
@@ -576,7 +589,7 @@ class Workbench:
                     messagebox.showinfo(
                         "Export Excel",
                         f"Included all {len(scans):,} loaded scans in Scan review and saved {rows:,} matched KYC rows. "
-                        f"{flagged:,} scans need review. "
+                        f"{flagged:,} scans need review.\n\nSaved to {filename}\n\n"
                         "Check the Scan review sheet against the original images.",
                     )
                 return
