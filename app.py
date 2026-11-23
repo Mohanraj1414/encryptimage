@@ -538,19 +538,31 @@ class Workbench:
 
 
     def choose_mi(self):
-        filename = filedialog.askopenfilename(
-            title="Select the Client 2 KYC MI source workbook",
-            filetypes=[("Excel workbook", "*.xlsx")],
-            parent=self.root,
-        )
-        if not filename:
-            return None
-        path = Path(filename).resolve()
-        try:
-            validate_mi_headers(path)
-        except (OSError, ValueError, KeyError, IndexError, BadZipFile, InvalidFileException) as error:
-            messagebox.showerror("KYC MI source workbook", str(error), parent=self.root)
-            return None
+        downloads = Path.home() / "Downloads"
+        initial_directory = downloads if downloads.is_dir() else Path.home()
+        while True:
+            filename = filedialog.askopenfilename(
+                title="Select the original Client 2 KYC MI workbook",
+                initialdir=initial_directory,
+                filetypes=[("Excel workbook", "*.xlsx")],
+                parent=self.root,
+            )
+            if not filename:
+                return None
+            path = Path(filename).resolve()
+            try:
+                validate_mi_headers(path)
+            except (OSError, ValueError, KeyError, IndexError, BadZipFile, InvalidFileException) as error:
+                messagebox.showerror(
+                    "KYC MI source workbook",
+                    f"{path.name}\n\n{error}\n\n"
+                    "Choose the original KYC MI workbook for this image batch. "
+                    "Its first worksheet starts with ID and numbered columns.",
+                    parent=self.root,
+                )
+                initial_directory = path.parent
+            else:
+                break
 
         self.mi_path = path
         try:
