@@ -59,7 +59,7 @@ def match_ids(text, index):
 
 
 def export_grid(path, scans, mi_path, progress):
-    index = load_mi(mi_path)
+    index = load_mi(mi_path) if mi_path is not None else {}
     executable = tesseract_path()
 
     def recognize(scan):
@@ -69,25 +69,34 @@ def export_grid(path, scans, mi_path, progress):
                 raise key
             text = ocr_text(executable, scan_bytes(image, key), 11)
             matched, unmatched = match_ids(text, index)
-            return matched, unmatched, ""
+            return matched, unmatched, text, ""
         except (OSError, ValueError, TimeoutExpired) as error:
-            return [], [], str(error)
+            return [], [], "", str(error)
 
     records = []
     report = []
+    scan_ocr = []
     folder_numbers = {folder: number for number, folder in enumerate(
         dict.fromkeys(image.parent for image, _ in scans), 1
     )}
     workers = min(4, max(1, len(scans)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for number, (matched, unmatched, error) in enumerate(pool.map(recognize, scans), 1):
+        for number, (matched, unmatched, text, error) in enumerate(pool.map(recognize, scans), 1):
             image = scans[number - 1][0]
             records.extend({**row, "Image Name": str(number)} for row in matched)
-            report.append([number, f"{folder_numbers[image.parent]:03d}_{image.parent.name}/{image.name}", len(matched),
+            source = f"{folder_numbers[image.parent]:03d}_{image.parent.name}/{image.name}"
+            if mi_path is None:
+                scan_ocr.append((number, source, unmatched, text, error))
+            report.append([number, source, len(matched),
                            ", ".join(unmatched), error or (
                                "No record IDs matched" if not matched else "Check against the page"
                            )])
             progress(number)
+    if mi_path is None:
+        export(path, None, scan_ocr=scan_ocr)
+        return sum(len(row[2]) for row in scan_ocr), sum(
+            not row[2] or bool(row[4]) for row in scan_ocr
+        )
     counts = Counter(record["Record No"] for record in records)
     duplicates = {key for key, count in counts.items() if count > 1}
     export(path, records, report, sorted(duplicates))
