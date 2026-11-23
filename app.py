@@ -1,7 +1,9 @@
 """Local desktop workbench for reviewing KYC records."""
+from datetime import datetime
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Thread
+from zipfile import BadZipFile
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -10,13 +12,52 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 from PIL import Image, ImageTk
 
 from decrypt_batch import save_jpeg
-from grid_records import export_grid
+from grid_records import MI_HEADERS, export_grid
 from scan_ocr import read_fields
 from subprocess import TimeoutExpired
 
 from image_reader import configured_key, legacy_key, load_scan
 
 from kyc import FIELDS, export, normalize, read_sheet
+
+
+def find_mi_workbook(images):
+    folders = tuple(dict.fromkeys(image.parent.resolve() for image in images))
+    # Prefer the selected folder, then its enclosing batch folders.
+    levels = [folders]
+    for depth in range(2):
+        levels.append(tuple(dict.fromkeys(folder.parent for folder in levels[-1])))
+    levels.append((Path.home() / "Downloads", Path(__file__).resolve().parent))
+
+    visited = set()
+    for level in levels:
+        matches = set()
+        for folder in level:
+            if folder in visited or not folder.is_dir():
+                continue
+            visited.add(folder)
+            try:
+                for candidate in folder.iterdir():
+                    if (candidate.is_file() and candidate.suffix.lower() == ".xlsx"
+                            and candidate.stem.casefold().startswith("kyc mi")):
+                        matches.add(candidate.resolve())
+            except OSError:
+                continue
+        valid = []
+        for candidate in sorted(matches):
+            try:
+                workbook = load_workbook(candidate, read_only=True, data_only=True)
+                try:
+                    headers = next(workbook.worksheets[0].values, ())[:len(MI_HEADERS)]
+                    if tuple(int(v) if str(v).isdigit() else v for v in headers) == MI_HEADERS:
+                        valid.append(candidate)
+                finally:
+                    workbook.close()
+            except (OSError, ValueError, KeyError, IndexError, BadZipFile):
+                continue
+        if valid:
+            return valid[0] if len(valid) == 1 else None
+    return None
 
 
 def scan_folder(folder):
@@ -471,18 +512,24 @@ class Workbench:
             self.mi_path = Path(filename)
 
     def save_grid(self):
-        if self.mi_path is None or not self.mi_path.is_file():
-            self.choose_mi()
-            if self.mi_path is None or not self.mi_path.is_file():
-                return
+        mi_path = self.mi_path
+        if mi_path is None or not mi_path.is_file():
+            mi_path = find_mi_workbook(self.images)
+            if mi_path is None:
+                self.choose_mi()
+                mi_path = self.mi_path
+                if mi_path is None or not mi_path.is_file():
+                    return
+        batch_name = self.images[0].parent.name if len({image.parent for image in self.images}) == 1 else "Combined"
         filename = filedialog.asksaveasfilename(
-            title="Save records matched from the decrypted pages",
-            defaultextension=".xlsx", initialfile="KYC_Output.xlsx",
+            title=f"Save Excel using {mi_path.name}",
+            defaultextension=".xlsx",
+            initialfile=f"KYC_{batch_name}_{datetime.now():%Y%m%d_%H%M%S}.xlsx",
             filetypes=[("Excel workbook", "*.xlsx")], parent=self.root,
         )
         if not filename:
             return
-        if Path(filename).resolve() == self.mi_path.resolve():
+        if Path(filename).resolve() == mi_path.resolve():
             messagebox.showerror("Export Excel", "Choose a path different from the source KYC MI workbook.")
             return
         scans = []
@@ -491,7 +538,6 @@ class Workbench:
                 scans.append((image, self.key_for(image)))
             except (OSError, ValueError) as error:
                 scans.append((image, ValueError(str(error))))
-        mi_path = self.mi_path
         events = SimpleQueue()
         dialog = tk.Toplevel(self.root)
         dialog.title("Export Excel")
