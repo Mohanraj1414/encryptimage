@@ -168,6 +168,23 @@ class GridExportTests(unittest.TestCase):
         self.assertEqual(unmatched, ["DuP-Akyz-3971"])
         self.assertEqual(gaps, [])
 
+    def test_export_interleaves_numbered_grid_columns_and_keeps_image_number(self):
+        output = self.root / "KYC_Recovered.xlsx"
+        ids = [f"HnT_DuP-AkyZ-{number}" for number in range(7700, 7706)]
+        # OCR can read the entire left column before it reads the right column.
+        text = " ".join(ids[::2] + ids[1::2])
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.scan_bytes", return_value=b""),
+            patch("grid_records.ocr_text", return_value=text),
+        ):
+            export_grid(output, [(self.scan, None)], None, Mock(), recover=True)
+        book = load_workbook(output, read_only=True)
+        self.addCleanup(book.close)
+        values = iter(book["KYC Data"].values)
+        self.assertEqual(next(values), FIELDS)
+        self.assertEqual([(row[0], row[3]) for row in values], [(identifier, "1") for identifier in ids])
+
 
 if __name__ == "__main__":
     unittest.main()

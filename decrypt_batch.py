@@ -24,13 +24,17 @@ def save_new_file(target, payload):
 
 
 
-def save_jpeg(source, target, key):
+def save_image(source, target, key, *, formats):
     if target.exists():
         raise FileExistsError(target)
     payload = scan_bytes(source, key)
-    with Image.open(BytesIO(payload), formats=("JPEG",)) as image:
+    with Image.open(BytesIO(payload), formats=formats) as image:
         image.load()
     save_new_file(target, payload)
+
+
+def save_jpeg(source, target, key):
+    save_image(source, target, key, formats=("JPEG",))
 
 
 def main():
