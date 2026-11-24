@@ -1,6 +1,7 @@
 """Match record IDs printed on decrypted grid pages to Client 2 MI data."""
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from io import BytesIO
 from pathlib import PurePosixPath
 import re
 from subprocess import TimeoutExpired
@@ -8,8 +9,9 @@ from zipfile import BadZipFile
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
+from PIL import Image
 
-from image_reader import scan_bytes
+from image_reader import open_image, scan_bytes
 from kyc import FIELDS, MISSING, export
 from scan_ocr import ocr_text, tesseract_path
 
@@ -61,6 +63,55 @@ def load_mi(path):
 def record_order(key):
     family = key.rstrip("0123456789")
     return family, int(key[len(family):])
+
+
+def grid_id_images(payload):
+    """Build two OCR views of cell headers on a ruled, two-column scan."""
+    try:
+        with open_image(BytesIO(payload)) as image:
+            gray = image.convert("L")
+    except (OSError, Image.DecompressionBombError):
+        return ()
+    width, height = gray.size
+    mask = gray.point(lambda shade: 255 if shade < 155 else 0)
+    vertical = mask.resize((width, 1), Image.Resampling.BOX)
+    left = [x for x in range(width // 8) if vertical.getpixel((x, 0)) >= 163]
+    middle = [x for x in range(width * 2 // 5, width * 3 // 5) if vertical.getpixel((x, 0)) >= 163]
+    if not left or not middle:
+        return ()
+    horizontal = mask.resize((1, height), Image.Resampling.BOX)
+    rules = []
+    for y in range(height):
+        if horizontal.getpixel((0, y)) >= 163:
+            if rules and y <= rules[-1] + 2:
+                rules[-1] = y
+            else:
+                rules.append(y)
+    if not 5 <= len(rules) <= 24:
+        return ()
+
+    columns = (left[-1] + 2, middle[-1] + 2)
+    starts = list(zip(rules, rules[1:]))
+    views = []
+    for width_ratio, height_ratio in ((.135, .0154), (.147, .0188)):
+        strip_width = max(1, round(width * width_ratio))
+        strip_height = max(1, round(width * height_ratio))
+        step = max(26, strip_height + 6)
+        with Image.new("L", (strip_width + 35, step * len(starts) * 2 + 12), 255) as sheet:
+            for row, (top, bottom) in enumerate(starts):
+                for column, x in enumerate(columns):
+                    start = top + 2
+                    end = min(bottom, top + strip_height)
+                    if end > start:
+                        with gray.crop((x, start, x + strip_width, end)) as strip:
+                            sheet.paste(strip, (12, 6 + (2 * row + column) * step))
+            with BytesIO() as buffer:
+                scale = min(2, 2400 / max(sheet.size))
+                size = tuple(round(length * scale) for length in sheet.size)
+                with sheet.resize(size, Image.Resampling.LANCZOS) as expanded:
+                    expanded.save(buffer, format="PNG")
+                views.append(buffer.getvalue())
+    return views
 
 
 def match_ids(text, index):
@@ -154,9 +205,17 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
         try:
             if isinstance(key, ValueError):
                 raise key
-            text = ocr_text(executable, scan_bytes(image, key), 11)
+            payload = scan_bytes(image, key)
+            text = ocr_text(executable, payload, 11)
+            id_text = [text]
+            for view in grid_id_images(payload):
+                try:
+                    id_text.append(ocr_text(executable, view, 6))
+                except (OSError, ValueError, TimeoutExpired):
+                    # Preserve results from the original scan if a supplemental pass fails.
+                    continue
             page_index = prior.get((image.parent.name.casefold(), image.name.casefold()), {}) if recover else index
-            matched, unmatched, gaps = match_ids(text, page_index)
+            matched, unmatched, gaps = match_ids("\n".join(id_text), page_index)
             return matched, unmatched, gaps, text, ""
         except (OSError, ValueError, TimeoutExpired) as error:
             return [], [], [], "", str(error)

@@ -1,9 +1,11 @@
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
 from openpyxl import Workbook, load_workbook
+from PIL import Image, ImageDraw
 
 import app
 from grid_records import MI_FIELDS, MI_HEADERS, canonical_id, export_grid, match_ids
@@ -135,9 +137,9 @@ class GridExportTests(unittest.TestCase):
         unreadable = self.scans / "unreadable.jpg"
         with (
             patch("grid_records.tesseract_path", return_value="ocr"),
-            patch("grid_records.scan_bytes", side_effect=lambda path, key: path.name),
+            patch("grid_records.scan_bytes", side_effect=lambda path, key: path.name.encode()),
             patch("grid_records.ocr_text", side_effect=lambda engine, name, mode: (
-                "HnT_DuP-AkyZ-2001" if name == self.scan.name else "DuP-Akyz-2002"
+                "HnT_DuP-AkyZ-2001" if name.decode() == self.scan.name else "DuP-Akyz-2002"
             )),
         ):
             self.assertEqual(
@@ -171,12 +173,26 @@ class GridExportTests(unittest.TestCase):
     def test_export_interleaves_numbered_grid_columns_and_keeps_image_number(self):
         output = self.root / "KYC_Recovered.xlsx"
         ids = [f"HnT_DuP-AkyZ-{number}" for number in range(7700, 7706)]
-        # OCR can read the entire left column before it reads the right column.
-        text = " ".join(ids[::2] + ids[1::2])
+        with BytesIO() as file, Image.new("L", (400, 500), 255) as grid:
+            draw = ImageDraw.Draw(grid)
+            draw.line((8, 12, 8, 480), fill=0)
+            draw.line((200, 12, 200, 480), fill=0)
+            for y in range(12, 480, 78):
+                draw.line((8, y, 392, y), fill=0)
+            grid.save(file, format="PNG")
+            payload = file.getvalue()
+        # Whole-page OCR misses the left column. The cell-header OCR supplies it.
+        def recognize(engine, image, mode):
+            if mode == 11:
+                self.assertEqual(image, payload)
+                return " ".join(ids[1::2])
+            self.assertNotEqual(image, payload)
+            return " ".join(ids[::2])
+
         with (
             patch("grid_records.tesseract_path", return_value="ocr"),
-            patch("grid_records.scan_bytes", return_value=b""),
-            patch("grid_records.ocr_text", return_value=text),
+            patch("grid_records.scan_bytes", return_value=payload),
+            patch("grid_records.ocr_text", side_effect=recognize),
         ):
             export_grid(output, [(self.scan, None)], None, Mock(), recover=True)
         book = load_workbook(output, read_only=True)
