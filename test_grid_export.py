@@ -58,20 +58,30 @@ class GridExportTests(unittest.TestCase):
         self.make_source(self.scans / "KYC MI other.xlsx")
         self.assertIsNone(app.find_mi_workbook([self.scan], None))
 
-    def test_cancelled_source_picker_does_not_export_form_rows(self):
+    def test_cancelled_source_picker_does_not_run_any_export(self):
         workbench = app.Workbench.__new__(app.Workbench)
         workbench.root = Mock()
         workbench.images = [self.scan]
         workbench.imported_workbook_path = None
         workbench.source_session_choice = None
         workbench.choose_mi = Mock(return_value=None)
-        workbench.export_matched_scans = Mock()
+        workbench.export_scan_batch = Mock()
         workbench.save_reviewed_rows = Mock()
-        with patch.object(app.messagebox, "askyesno", return_value=True):
-            workbench.save_grid()
+        workbench.save_grid()
         workbench.choose_mi.assert_called_once()
-        workbench.export_matched_scans.assert_not_called()
+        workbench.export_scan_batch.assert_not_called()
         workbench.save_reviewed_rows.assert_not_called()
+
+    def test_grid_export_uses_discovered_source_and_ocr_review_is_explicit(self):
+        source = self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
+        workbench = Mock(images=[self.scan], imported_workbook_path=None, source_session_choice=None)
+        app.Workbench.save_grid(workbench)
+        workbench.choose_mi.assert_not_called()
+        workbench.export_scan_batch.assert_called_once_with(source)
+
+        workbench.export_scan_batch.reset_mock()
+        app.Workbench.export_ocr_review(workbench)
+        workbench.export_scan_batch.assert_called_once_with(None)
 
     def test_picker_rejects_generated_output_and_remembers_valid_source(self):
         output = self.root / "generated.xlsx"
