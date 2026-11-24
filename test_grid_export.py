@@ -123,18 +123,32 @@ class GridExportTests(unittest.TestCase):
             self.assertEqual(export_grid(output, [(other, None), (self.scan, None)], None, Mock(), recover=True), (1, 1))
         book = load_workbook(output, read_only=True)
         self.addCleanup(book.close)
-        _, recovered = book["KYC Data"].values
+        _, pending, recovered = book["KYC Data"].values
+        self.assertEqual(pending[:5], (identifier, None, None, "1", None))
+        self.assertEqual(pending[-1], "REVIEW: No source data for this record ID")
         self.assertEqual(recovered[:5], (identifier, "N.A", "N.A", "2", "Synthetic Person"))
         _, first, second = book["Scan review"].values
         self.assertEqual((first[2], first[3], second[2]), (0, identifier, 1))
 
-    def test_recovery_with_no_compatible_export_stops_before_ocr(self):
+    def test_recovery_without_prior_export_keeps_full_ids_and_reviews_unreadable_pages(self):
         output = self.root / "KYC_Recovered.xlsx"
-        with patch("grid_records.tesseract_path") as ocr:
-            with self.assertRaisesRegex(ValueError, "No KYC MI workbook or compatible earlier export"):
-                export_grid(output, [(self.scan, None)], None, Mock(), recover=True)
-        ocr.assert_not_called()
-        self.assertFalse(output.exists())
+        unreadable = self.scans / "unreadable.jpg"
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.scan_bytes", side_effect=lambda path, key: path.name),
+            patch("grid_records.ocr_text", side_effect=lambda engine, name, mode: (
+                "HnT_DuP-AkyZ-2001" if name == self.scan.name else "DuP-Akyz-2002"
+            )),
+        ):
+            self.assertEqual(
+                export_grid(output, [(self.scan, None), (unreadable, None)], None, Mock(), recover=True), (0, 2)
+            )
+        book = load_workbook(output, read_only=True)
+        self.addCleanup(book.close)
+        _, pending = book["KYC Data"].values
+        self.assertEqual((pending[0], pending[3]), ("HnT_DuP-AkyZ-2001", "1"))
+        _, first, second = book["Scan review"].values
+        self.assertEqual((first[0], first[2], second[0], second[3]), (1, 0, 2, "DuP-Akyz-2002"))
 
     def test_page_ids_are_sorted_and_fragmentary_ids_and_gaps_are_reported(self):
         ids = ["HnT_DuP-AkyZ-3968", "HnT_DuP-AkyZ-3970", "HnT_DuP-AkyZ-3969"]

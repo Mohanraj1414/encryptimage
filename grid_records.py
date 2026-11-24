@@ -58,6 +58,11 @@ def load_mi(path):
         book.close()
 
 
+def record_order(key):
+    family = key.rstrip("0123456789")
+    return family, int(key[len(family):])
+
+
 def match_ids(text, index):
     found = {}
     text = " ".join(text.split())
@@ -68,10 +73,6 @@ def match_ids(text, index):
         family = canonical_id(match["family"])
         key = ID_PREFIX[family] + family + match["number"]
         found.setdefault(key, match.group())
-
-    def record_order(key):
-        family = key.rstrip("0123456789")
-        return family, int(key[len(family):])
 
     ordered = sorted(found, key=record_order)
     matched = [index[key] for key in ordered if key in index]
@@ -145,11 +146,6 @@ def load_prior_exports(folder, scans):
 def export_grid(path, scans, mi_path, progress, *, recover=False):
     index = load_mi(mi_path) if mi_path is not None else {}
     prior = load_prior_exports(path.parent, scans) if recover else {}
-    if recover and not any(prior.values()):
-        raise ValueError(
-            "No KYC MI workbook or compatible earlier export was found for these scans. "
-            "Use File > Change source workbook to set a source if one becomes available."
-        )
     ocr_only = mi_path is None and not recover
     executable = tesseract_path()
 
@@ -168,6 +164,7 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
     records = []
     report = []
     scan_ocr = []
+    matched_count = 0
     flagged = 0
     folder_numbers = {folder: number for number, folder in enumerate(
         dict.fromkeys(image.parent for image, _ in scans), 1
@@ -176,7 +173,17 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for number, (matched, unmatched, gaps, text, error) in enumerate(pool.map(recognize, scans), 1):
             image = scans[number - 1][0]
-            records.extend({**row, "Image Name": str(number)} for row in matched)
+            matched_count += len(matched)
+            page_records = matched
+            if recover:
+                review_rows = [
+                    {"Record No": identifier, "Remark": "REVIEW: No source data for this record ID"}
+                    for identifier in unmatched if PRINTED_ID.fullmatch(identifier)
+                ]
+                page_records = sorted(
+                    [*matched, *review_rows], key=lambda row: record_order(canonical_id(row["Record No"]))
+                )
+            records.extend({**row, "Image Name": str(number)} for row in page_records)
             source = f"{folder_numbers[image.parent]:03d}_{image.parent.name}/{image.name}"
             if ocr_only:
                 scan_ocr.append((number, source, unmatched, text, error))
@@ -195,4 +202,4 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
     counts = Counter(record["Record No"] for record in records)
     duplicates = {key for key, count in counts.items() if count > 1}
     export(path, records, report, sorted(duplicates), normalized=recover)
-    return len(records), flagged
+    return matched_count, flagged

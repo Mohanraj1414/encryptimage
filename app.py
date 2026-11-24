@@ -671,14 +671,16 @@ class Workbench:
                     if not ocr_only and not rows:
                         messagebox.showwarning(
                             title,
-                            "No KYC records matched this batch. Check the sources and review the scan results.\n\n"
-                            f"Scan review saved to {filename}",
+                            "No KYC records matched a verified source. Check Scan review and any rows marked "
+                            "REVIEW in KYC Data.\n\n"
+                            f"Workbook saved to {filename}",
                             parent=self.root,
                         )
                         return
                     row_label = "OCR-detected record IDs" if ocr_only else "matched KYC rows"
                     source_note = (
-                        "Recovered from earlier exports. Unmatched IDs still need source data.\n\n"
+                        "Rows marked REVIEW contain an OCR ID and still need source data. "
+                        "Pages without a readable ID appear in Scan review.\n\n"
                         if recover else ""
                     )
                     messagebox.showinfo(
