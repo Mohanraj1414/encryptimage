@@ -125,7 +125,7 @@ def read_sheet(path, sheet_name, mapping, header_row=1):
         workbook.close()
 
 
-def export(path, records, scan_report=None, duplicates=(), *, scan_ocr=None):
+def export(path, records, scan_report=None, duplicates=(), *, scan_ocr=None, normalized=False):
     workbook = Workbook(write_only=True)
     from openpyxl.cell import WriteOnlyCell
 
@@ -145,7 +145,8 @@ def export(path, records, scan_report=None, duplicates=(), *, scan_ocr=None):
         sheet.append(titles)
         for record in records:
             row = []
-            for value in normalize(record):
+            values = (str(record.get(field) or "") for field in FIELDS) if normalized else normalize(record)
+            for value in values:
                 cell = WriteOnlyCell(sheet, value=value)
                 cell.data_type = "s"
                 row.append(cell)

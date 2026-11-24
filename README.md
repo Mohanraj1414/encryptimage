@@ -12,10 +12,12 @@ Choose **Open image** for one scan or **Open folder** for a batch. To combine ba
 ## Export records from Client 2 grid pages
 
 1. Open your encrypted JPG folder and check that the page preview is readable.
-2. Click **Export Excel**. If the source workbook picker opens, select the original numbered **KYC MI** workbook. Cancelling the picker cancels the export. This step uses local Tesseract OCR or the installed Windows OCR language.
+2. Click **Export Excel**. The app finds a numbered **KYC MI** workbook automatically. When no MI workbook is available, it looks for earlier matched exports in **Downloads > KYC Exports** and recovers rows with the same scan folder name, filename and printed record ID. This step uses local Tesseract OCR or the installed Windows OCR language.
 3. The app reads printed record IDs and uses the matching MI rows to populate the 22 columns, with one row per matched ID on each image. Image Name holds the page number. The **Scan review** sheet lists the source pages, counts and unmatched IDs. Compare against the source pages because OCR may miss or misread IDs.
 
 Use **File > Export OCR review...** to save raw OCR text and detected record IDs for troubleshooting. That workbook has **Scan review** and **Detected IDs** sheets.
+
+Recovered workbooks start with `KYC_Recovered_`. Their **Scan review** sheet lists detected IDs that still need source data. The export button runs without a source picker. You can set a numbered source explicitly from **File > Change source workbook...**.
 
 For manually entered or labeled forms, use **File > Export reviewed form rows**. **Read scan text** can prefill explicitly labeled values, and **Check row** previews remarks.
 

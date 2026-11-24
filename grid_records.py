@@ -1,18 +1,21 @@
 """Match record IDs printed on decrypted grid pages to Client 2 MI data."""
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
+from pathlib import PurePosixPath
 import re
 from subprocess import TimeoutExpired
+from zipfile import BadZipFile
 
 from openpyxl import load_workbook
+from openpyxl.utils.exceptions import InvalidFileException
 
 from image_reader import scan_bytes
-from kyc import FIELDS, export
+from kyc import FIELDS, MISSING, export
 from scan_ocr import ocr_text, tesseract_path
 
 MI_HEADERS = ("ID", *range(1, 17), 18, 19, 20, 21)
 MI_FIELDS = FIELDS[:3] + FIELDS[4:-1]
+MATCHED_EXPORT = re.compile(r"KYC_.+_\d{8}_\d{6}_\d{6}\.xlsx", re.IGNORECASE)
 PRINTED_ID = re.compile(
     r"(?<![a-z0-9])(?:fbt[\s_-]*xhu[\s_-]*ent|hnt[\s_-]*dup[\s_-]*akyz)"
     r"[\s_-]+[0-9]+(?![a-z0-9])", re.IGNORECASE,
@@ -58,8 +61,72 @@ def match_ids(text, index):
     return matched, unmatched
 
 
-def export_grid(path, scans, mi_path, progress):
+def read_prior_export(path, scan_names):
+    with path.open("rb") as source:
+        book = load_workbook(source, read_only=True, data_only=True)
+        try:
+            if not {"KYC Data", "Scan review"}.issubset(book.sheetnames):
+                return []
+            records = iter(book["KYC Data"].values)
+            report = iter(book["Scan review"].values)
+            if next(records, ()) != FIELDS or next(report, ())[:3] != (
+                "Image Name", "Source image", "Matched rows"
+            ):
+                return []
+            pages = {}
+            for page, name, count, *_ in report:
+                if not count or not isinstance(name, str):
+                    continue
+                source_name = PurePosixPath(name)
+                folder = re.sub(r"^\d{3,}_", "", source_name.parent.name)
+                scan = (folder.casefold(), source_name.name.casefold())
+                if scan in scan_names:
+                    pages[str(page)] = scan
+            if not pages:
+                return []
+            return [
+                (pages[str(row[3])], canonical_id(row[0]), dict(zip(FIELDS, row)))
+                for row in records
+                if str(row[3]) in pages
+                and isinstance(row[0], str)
+                and PRINTED_ID.fullmatch(row[0])
+                and any(str(value or "").strip().casefold() not in MISSING for value in row[4:-1])
+            ]
+        finally:
+            book.close()
+
+
+def load_prior_exports(folder, scans):
+    scan_names = {(image.parent.name.casefold(), image.name.casefold()) for image, _ in scans}
+    index = {}
+    conflicts = set()
+    for path in folder.glob("KYC_*.xlsx"):
+        if not MATCHED_EXPORT.fullmatch(path.name) or path.name.casefold().startswith(("kyc_ocr_", "kyc_recovered_")):
+            continue
+        try:
+            entries = read_prior_export(path, scan_names)
+        except (OSError, ValueError, BadZipFile, InvalidFileException, KeyError, SyntaxError):
+            continue
+        for scan, identifier, record in entries:
+            key = (scan, identifier)
+            record.pop("Image Name")
+            previous = index.setdefault(scan, {}).setdefault(identifier, record)
+            if previous != record:
+                conflicts.add(key)
+    for scan, identifier in conflicts:
+        del index[scan][identifier]
+    return index
+
+
+def export_grid(path, scans, mi_path, progress, *, recover=False):
     index = load_mi(mi_path) if mi_path is not None else {}
+    prior = load_prior_exports(path.parent, scans) if recover else {}
+    if recover and not any(prior.values()):
+        raise ValueError(
+            "No KYC MI workbook or compatible earlier export was found for these scans. "
+            "Use File > Change source workbook to set a source if one becomes available."
+        )
+    ocr_only = mi_path is None and not recover
     executable = tesseract_path()
 
     def recognize(scan):
@@ -68,7 +135,8 @@ def export_grid(path, scans, mi_path, progress):
             if isinstance(key, ValueError):
                 raise key
             text = ocr_text(executable, scan_bytes(image, key), 11)
-            matched, unmatched = match_ids(text, index)
+            page_index = prior.get((image.parent.name.casefold(), image.name.casefold()), {}) if recover else index
+            matched, unmatched = match_ids(text, page_index)
             return matched, unmatched, text, ""
         except (OSError, ValueError, TimeoutExpired) as error:
             return [], [], "", str(error)
@@ -85,19 +153,19 @@ def export_grid(path, scans, mi_path, progress):
             image = scans[number - 1][0]
             records.extend({**row, "Image Name": str(number)} for row in matched)
             source = f"{folder_numbers[image.parent]:03d}_{image.parent.name}/{image.name}"
-            if mi_path is None:
+            if ocr_only:
                 scan_ocr.append((number, source, unmatched, text, error))
             report.append([number, source, len(matched),
                            ", ".join(unmatched), error or (
                                "No record IDs matched" if not matched else "Check against the page"
                            )])
             progress(number)
-    if mi_path is None:
+    if ocr_only:
         export(path, None, scan_ocr=scan_ocr)
         return sum(len(row[2]) for row in scan_ocr), sum(
             not row[2] or bool(row[4]) for row in scan_ocr
         )
     counts = Counter(record["Record No"] for record in records)
     duplicates = {key for key, count in counts.items() if count > 1}
-    export(path, records, report, sorted(duplicates))
+    export(path, records, report, sorted(duplicates), normalized=recover)
     return len(records), sum(not row[2] or bool(row[3]) for row in report)

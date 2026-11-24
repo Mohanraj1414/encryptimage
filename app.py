@@ -600,8 +600,8 @@ class Workbench:
     def save_grid(self):
         mi_path = find_mi_workbook(self.images, self.imported_workbook_path, self.source_session_choice)
         if mi_path is None:
-            mi_path = self.choose_mi()
-        if mi_path is not None:
+            self.export_scan_batch(None, recover=True)
+        else:
             self.export_scan_batch(mi_path)
 
     def export_ocr_review(self):
@@ -610,8 +610,9 @@ class Workbench:
             return
         self.export_scan_batch(None)
 
-    def export_scan_batch(self, mi_path):
-        title = "Export Excel" if mi_path is not None else "Export OCR review"
+    def export_scan_batch(self, mi_path, *, recover=False):
+        ocr_only = mi_path is None and not recover
+        title = "Export OCR review" if ocr_only else "Export Excel"
         try:
             destination = Path.home() / "Downloads" / "KYC Exports"
             destination.mkdir(parents=True, exist_ok=True)
@@ -622,6 +623,8 @@ class Workbench:
         folders = {image.parent for image in self.images}
         batch_name = (self.images[0].parent.name or "Batch") if len(folders) == 1 else "Combined"
         prefix = "KYC" if mi_path is not None else "KYC_OCR"
+        if recover:
+            prefix = "KYC_Recovered"
         filename = destination / f"{prefix}_{batch_name}_{datetime.now():%Y%m%d_%H%M%S_%f}.xlsx"
         scans = []
         for image in self.images:
@@ -642,7 +645,9 @@ class Workbench:
 
         def run():
             try:
-                result = export_grid(filename, scans, mi_path, lambda count: events.put(("progress", count)))
+                result = export_grid(
+                    filename, scans, mi_path, lambda count: events.put(("progress", count)), recover=recover
+                )
                 events.put(("done", result))
             except Exception as error:
                 events.put(("error", str(error)))
@@ -663,21 +668,24 @@ class Workbench:
                     messagebox.showerror(title, value)
                 else:
                     rows, flagged = value
-                    if mi_path is not None and not rows:
+                    if not ocr_only and not rows:
                         messagebox.showwarning(
                             title,
-                            "No KYC records matched the source workbook. Check that the source workbook covers "
-                            "this batch and review the scan results.\n\n"
+                            "No KYC records matched this batch. Check the sources and review the scan results.\n\n"
                             f"Scan review saved to {filename}",
                             parent=self.root,
                         )
                         return
-                    row_label = "matched KYC rows" if mi_path is not None else "OCR-detected record IDs"
+                    row_label = "OCR-detected record IDs" if ocr_only else "matched KYC rows"
+                    source_note = (
+                        "Recovered from earlier exports. Unmatched IDs still need source data.\n\n"
+                        if recover else ""
+                    )
                     messagebox.showinfo(
                         title,
                         f"Included all {len(scans):,} loaded scans in Scan review and saved {rows:,} {row_label}. "
                         f"{flagged:,} scans need review.\n\nSaved to {filename}\n\n"
-                        "Check the Scan review sheet against the original images.",
+                        f"{source_note}Check the Scan review sheet against the original images.",
                     )
                 return
 

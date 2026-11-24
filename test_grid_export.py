@@ -58,19 +58,11 @@ class GridExportTests(unittest.TestCase):
         self.make_source(self.scans / "KYC MI other.xlsx")
         self.assertIsNone(app.find_mi_workbook([self.scan], None))
 
-    def test_cancelled_source_picker_does_not_run_any_export(self):
-        workbench = app.Workbench.__new__(app.Workbench)
-        workbench.root = Mock()
-        workbench.images = [self.scan]
-        workbench.imported_workbook_path = None
-        workbench.source_session_choice = None
-        workbench.choose_mi = Mock(return_value=None)
-        workbench.export_scan_batch = Mock()
-        workbench.save_reviewed_rows = Mock()
-        workbench.save_grid()
-        workbench.choose_mi.assert_called_once()
-        workbench.export_scan_batch.assert_not_called()
-        workbench.save_reviewed_rows.assert_not_called()
+    def test_grid_export_uses_recovery_without_opening_picker(self):
+        workbench = Mock(images=[self.scan], imported_workbook_path=None, source_session_choice=None)
+        app.Workbench.save_grid(workbench)
+        workbench.choose_mi.assert_not_called()
+        workbench.export_scan_batch.assert_called_once_with(None, recover=True)
 
     def test_grid_export_uses_discovered_source_and_ocr_review_is_explicit(self):
         source = self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
@@ -115,6 +107,34 @@ class GridExportTests(unittest.TestCase):
         self.assertEqual(values[:5], ("HnT_DuP-AkyZ-2001", "Test Account", "N.A", "1", "Synthetic Person"))
         _, first_page, second_page = workbook["Scan review"].values
         self.assertEqual((first_page[2], second_page[2], second_page[3]), (1, 0, "HnT_DuP-AkyZ-9999"))
+
+    def test_recovers_exact_scan_and_id_with_current_page_number(self):
+        archived = self.root / "KYC_images_20261123_131254_062641.xlsx"
+        output = self.root / "KYC_Recovered.xlsx"
+        identifier = "HnT_DuP-AkyZ-2001"
+        record = {"Record No": identifier, "Image Name": "15", "Full Name": "SYNTHETIC PERSON"}
+        app.export(archived, [record], [[15, f"001_images/{self.scan.name}", 1, "", "Review"]])
+        other = self.scans / "other.jpg"
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.scan_bytes", return_value=b""),
+            patch("grid_records.ocr_text", return_value=identifier),
+        ):
+            self.assertEqual(export_grid(output, [(other, None), (self.scan, None)], None, Mock(), recover=True), (1, 1))
+        book = load_workbook(output, read_only=True)
+        self.addCleanup(book.close)
+        _, recovered = book["KYC Data"].values
+        self.assertEqual(recovered[:5], (identifier, "N.A", "N.A", "2", "Synthetic Person"))
+        _, first, second = book["Scan review"].values
+        self.assertEqual((first[2], first[3], second[2]), (0, identifier, 1))
+
+    def test_recovery_with_no_compatible_export_stops_before_ocr(self):
+        output = self.root / "KYC_Recovered.xlsx"
+        with patch("grid_records.tesseract_path") as ocr:
+            with self.assertRaisesRegex(ValueError, "No KYC MI workbook or compatible earlier export"):
+                export_grid(output, [(self.scan, None)], None, Mock(), recover=True)
+        ocr.assert_not_called()
+        self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
