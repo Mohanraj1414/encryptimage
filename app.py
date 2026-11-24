@@ -156,6 +156,7 @@ class Workbench:
         menu = tk.Menu(root)
         file_menu = tk.Menu(menu, tearoff=False)
         file_menu.add_command(label="Export reviewed form rows", command=self.save_reviewed_rows)
+        file_menu.add_command(label="Export OCR review...", command=self.export_ocr_review)
         file_menu.add_command(label="Change source workbook...", command=self.choose_mi)
         menu.add_cascade(label="File", menu=file_menu)
         root.configure(menu=menu)
@@ -599,34 +600,23 @@ class Workbench:
     def save_grid(self):
         mi_path = find_mi_workbook(self.images, self.imported_workbook_path, self.source_session_choice)
         if mi_path is None:
-            if messagebox.askyesno(
-                "KYC MI source workbook",
-                "A single valid KYC MI source could not be located.\n\n"
-                "Select your original KYC MI .xlsx and remember it for future exports?",
-                parent=self.root,
-            ):
-                mi_path = self.choose_mi()
-            if mi_path is None:
-                self.offer_new_workbook()
-                return
-        self.export_matched_scans(mi_path)
+            mi_path = self.choose_mi()
+        if mi_path is not None:
+            self.export_scan_batch(mi_path)
 
-    def offer_new_workbook(self):
-        if messagebox.askyesno(
-            "Export Excel",
-            "Export cancelled: no source workbook selected\n\n"
-            "Save as new workbook instead? This reads the loaded scans and saves OCR text and detected record IDs "
-            "without matching scans to source records.",
-            parent=self.root,
-        ):
-            self.export_matched_scans(None)
+    def export_ocr_review(self):
+        if not self.images:
+            messagebox.showinfo("Export OCR review", "Open an image or folder first.", parent=self.root)
+            return
+        self.export_scan_batch(None)
 
-    def export_matched_scans(self, mi_path):
+    def export_scan_batch(self, mi_path):
+        title = "Export Excel" if mi_path is not None else "Export OCR review"
         try:
             destination = Path.home() / "Downloads" / "KYC Exports"
             destination.mkdir(parents=True, exist_ok=True)
         except (OSError, ValueError) as error:
-            messagebox.showerror("Export Excel", str(error))
+            messagebox.showerror(title, str(error))
             return
 
         folders = {image.parent for image in self.images}
@@ -641,7 +631,7 @@ class Workbench:
                 scans.append((image, ValueError(str(error))))
         events = SimpleQueue()
         dialog = tk.Toplevel(self.root)
-        dialog.title("Export Excel")
+        dialog.title(title)
         dialog.transient(self.root)
         dialog.grab_set()
         dialog.protocol("WM_DELETE_WINDOW", lambda: None)
@@ -670,12 +660,21 @@ class Workbench:
                     continue
                 dialog.destroy()
                 if kind == "error":
-                    messagebox.showerror("Export Excel", value)
+                    messagebox.showerror(title, value)
                 else:
                     rows, flagged = value
+                    if mi_path is not None and not rows:
+                        messagebox.showwarning(
+                            title,
+                            "No KYC records matched the source workbook. Check that the source workbook covers "
+                            "this batch and review the scan results.\n\n"
+                            f"Scan review saved to {filename}",
+                            parent=self.root,
+                        )
+                        return
                     row_label = "matched KYC rows" if mi_path is not None else "OCR-detected record IDs"
                     messagebox.showinfo(
-                        "Export Excel",
+                        title,
                         f"Included all {len(scans):,} loaded scans in Scan review and saved {rows:,} {row_label}. "
                         f"{flagged:,} scans need review.\n\nSaved to {filename}\n\n"
                         "Check the Scan review sheet against the original images.",

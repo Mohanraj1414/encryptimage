@@ -15,6 +15,8 @@ Choose **Open image** for one scan or **Open folder** for a batch. To combine ba
 2. Click **Export Excel**. If the source workbook picker opens, select the original numbered **KYC MI** workbook. Cancelling the picker cancels the export. This step uses local Tesseract OCR or the installed Windows OCR language.
 3. The app reads printed record IDs and uses the matching MI rows to populate the 22 columns, with one row per matched ID on each image. Image Name holds the page number. The **Scan review** sheet lists the source pages, counts and unmatched IDs. Compare against the source pages because OCR may miss or misread IDs.
 
+Use **File > Export OCR review...** to save raw OCR text and detected record IDs for troubleshooting. That workbook has **Scan review** and **Detected IDs** sheets.
+
 For manually entered or labeled forms, use **File > Export reviewed form rows**. **Read scan text** can prefill explicitly labeled values, and **Check row** previews remarks.
 
 For a readable XLSX, choose its worksheet and header row, then map the actual columns. The example workbook uses numbered headers, so its mapping needs to be supplied by the operator. Exact named-header matches are preselected. Ensure identifier, postal code and phone columns are stored as text to preserve leading zeros.
