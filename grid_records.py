@@ -20,6 +20,13 @@ PRINTED_ID = re.compile(
     r"(?<![a-z0-9])(?:fbt[\s_-]*xhu[\s_-]*ent|hnt[\s_-]*dup[\s_-]*akyz)"
     r"[\s_-]+[0-9]+(?![a-z0-9])", re.IGNORECASE,
 )
+# OCR can lose the first segment in a two-column grid. The remaining
+# two segments still distinguish the supported record families.
+PARTIAL_ID = re.compile(
+    r"(?<![a-z0-9])(?P<family>dup[\s_-]*akyz|xhu[\s_-]*ent)[\s_-]+"
+    r"(?P<number>[0-9]+)(?![a-z0-9])", re.IGNORECASE,
+)
+ID_PREFIX = {"dupakyz": "hnt", "xhuent": "fbt"}
 
 
 def canonical_id(value):
@@ -53,12 +60,29 @@ def load_mi(path):
 
 def match_ids(text, index):
     found = {}
-    for match in PRINTED_ID.finditer(text.replace("\n", " ")):
+    text = " ".join(text.split())
+    for match in PRINTED_ID.finditer(text):
         printed = match.group()
         found.setdefault(canonical_id(printed), printed)
-    matched = [index[key] for key in found if key in index]
-    unmatched = [printed for key, printed in found.items() if key not in index]
-    return matched, unmatched
+    for match in PARTIAL_ID.finditer(PRINTED_ID.sub(" ", text)):
+        family = canonical_id(match["family"])
+        key = ID_PREFIX[family] + family + match["number"]
+        found.setdefault(key, match.group())
+
+    def record_order(key):
+        family = key.rstrip("0123456789")
+        return family, int(key[len(family):])
+
+    ordered = sorted(found, key=record_order)
+    matched = [index[key] for key in ordered if key in index]
+    unmatched = [found[key] for key in ordered if key not in index]
+    gaps = []
+    for left, right in zip(ordered, ordered[1:]):
+        family, low = record_order(left)
+        next_family, high = record_order(right)
+        if family == next_family and high > low + 1:
+            gaps.append(str(low + 1) if high == low + 2 else f"{low + 1}-{high - 1}")
+    return matched, unmatched, gaps
 
 
 def read_prior_export(path, scan_names):
@@ -136,29 +160,32 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
                 raise key
             text = ocr_text(executable, scan_bytes(image, key), 11)
             page_index = prior.get((image.parent.name.casefold(), image.name.casefold()), {}) if recover else index
-            matched, unmatched = match_ids(text, page_index)
-            return matched, unmatched, text, ""
+            matched, unmatched, gaps = match_ids(text, page_index)
+            return matched, unmatched, gaps, text, ""
         except (OSError, ValueError, TimeoutExpired) as error:
-            return [], [], "", str(error)
+            return [], [], [], "", str(error)
 
     records = []
     report = []
     scan_ocr = []
+    flagged = 0
     folder_numbers = {folder: number for number, folder in enumerate(
         dict.fromkeys(image.parent for image, _ in scans), 1
     )}
     workers = min(4, max(1, len(scans)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for number, (matched, unmatched, text, error) in enumerate(pool.map(recognize, scans), 1):
+        for number, (matched, unmatched, gaps, text, error) in enumerate(pool.map(recognize, scans), 1):
             image = scans[number - 1][0]
             records.extend({**row, "Image Name": str(number)} for row in matched)
             source = f"{folder_numbers[image.parent]:03d}_{image.parent.name}/{image.name}"
             if ocr_only:
                 scan_ocr.append((number, source, unmatched, text, error))
-            report.append([number, source, len(matched),
-                           ", ".join(unmatched), error or (
-                               "No record IDs matched" if not matched else "Check against the page"
-                           )])
+            else:
+                status = error or ("No record IDs matched" if not matched else "Check against the page")
+                if gaps:
+                    status += ". Check ID gaps: " + ", ".join(gaps)
+                report.append([number, source, len(matched), ", ".join(unmatched), status])
+                flagged += bool(error or not matched or unmatched or gaps)
             progress(number)
     if ocr_only:
         export(path, None, scan_ocr=scan_ocr)
@@ -168,4 +195,4 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
     counts = Counter(record["Record No"] for record in records)
     duplicates = {key for key, count in counts.items() if count > 1}
     export(path, records, report, sorted(duplicates), normalized=recover)
-    return len(records), sum(not row[2] or bool(row[3]) for row in report)
+    return len(records), flagged

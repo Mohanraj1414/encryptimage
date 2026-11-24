@@ -6,7 +6,7 @@ from unittest.mock import Mock, patch
 from openpyxl import Workbook, load_workbook
 
 import app
-from grid_records import MI_FIELDS, MI_HEADERS, export_grid
+from grid_records import MI_FIELDS, MI_HEADERS, canonical_id, export_grid, match_ids
 from kyc import FIELDS
 
 
@@ -135,6 +135,24 @@ class GridExportTests(unittest.TestCase):
                 export_grid(output, [(self.scan, None)], None, Mock(), recover=True)
         ocr.assert_not_called()
         self.assertFalse(output.exists())
+
+    def test_page_ids_are_sorted_and_fragmentary_ids_and_gaps_are_reported(self):
+        ids = ["HnT_DuP-AkyZ-3968", "HnT_DuP-AkyZ-3970", "HnT_DuP-AkyZ-3969"]
+        records = {canonical_id(identifier): identifier for identifier in ids}
+        text = (
+            "HnT_DuP-AkyZ-3968 HnT_DuP-AkyZ-3970 "
+            "garbled _ DuP-Akyz-3969 HTIT Dup-Akyz-3973 HnT_DuP-AkyZ-3973"
+        )
+        matched, unmatched, gaps = match_ids(text, records)
+        self.assertEqual(matched, sorted(ids))
+        self.assertEqual(unmatched, ["HnT_DuP-AkyZ-3973"])
+        self.assertEqual(gaps, ["3971-3972"])
+
+    def test_fragmentary_ids_without_source_are_unmatched(self):
+        matched, unmatched, gaps = match_ids("garbled _ DuP-Akyz-3971", {})
+        self.assertEqual(matched, [])
+        self.assertEqual(unmatched, ["DuP-Akyz-3971"])
+        self.assertEqual(gaps, [])
 
 
 if __name__ == "__main__":
