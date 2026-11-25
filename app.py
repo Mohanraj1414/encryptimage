@@ -14,14 +14,12 @@ from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.exceptions import InvalidFileException
 from PIL import Image, ImageTk
 
-from decrypt_batch import save_jpeg
+from decrypt_batch import save_image
 from grid_records import MI_HEADERS, export_grid
-from scan_ocr import read_fields
-from subprocess import TimeoutExpired
 
 from image_reader import configured_key, legacy_key, load_scan
 
-from kyc import FIELDS, export, normalize, read_sheet
+from kyc import FIELDS, export, read_sheet
 
 
 def mi_settings_path():
@@ -59,11 +57,8 @@ def validate_mi_headers(path):
         raise ValueError("Choose an original .xlsx workbook. Excel temporary files are excluded.")
     if not path.is_file():
         raise ValueError("The workbook was moved, deleted or is unavailable.")
-    lock_names = ("~$" + path.name, "~$" + path.name[2:])
-    if any(path.with_name(name).exists() for name in lock_names):
-        raise ValueError("Close the workbook in Excel and try again.")
-
-    # Use the same first-sheet schema as grid_records.load_mi.
+    # Excel's owner file can outlive the editing session. Use actual read
+    # access and the same first-sheet schema as grid_records.load_mi.
     try:
         with path.open("rb") as source:
             workbook = load_workbook(source, read_only=True, data_only=True)
@@ -149,12 +144,12 @@ class Workbench:
         self.source_session_choice = None
         self.values = {field: tk.StringVar() for field in FIELDS}
         self.status = tk.StringVar()
-        self.preview = tk.StringVar()
         root.title("KYC Workbench")
         root.geometry("1200x810")
         root.protocol("WM_DELETE_WINDOW", lambda: self.discard() and root.destroy())
         menu = tk.Menu(root)
         file_menu = tk.Menu(menu, tearoff=False)
+        file_menu.add_command(label="Decrypt Images...", command=self.decrypt_images)
         file_menu.add_command(label="Export reviewed form rows", command=self.save_reviewed_rows)
         file_menu.add_command(label="Export OCR review...", command=self.export_ocr_review)
         file_menu.add_command(label="Change source workbook...", command=self.choose_mi)
@@ -165,11 +160,11 @@ class Workbench:
         for label, action in (
             ("Open image", self.open_image), ("Open folder", self.open_images),
             ("Open multiple folders", self.open_multiple_folders),
-            ("Decrypt Images", self.decrypt_images), ("Set legacy key", self.set_key),
+            ("Set legacy key", self.set_key),
             ("Import Excel", self.import_excel),
             ("Previous", lambda: self.move(-1)), ("Next", lambda: self.move(1)),
-            ("Go to row", self.go_to), ("Read scan text", self.read_scan),
-            ("Check row", self.check), ("Export Excel", self.save),
+            ("Go to row", self.go_to), ("Download all images", self.download_all_images),
+            ("Export Excel", self.save),
         ):
             ttk.Button(toolbar, text=label, command=action).pack(side="left", padx=3)
         ttk.Label(root, textvariable=self.status, padding=(12, 6)).pack(fill="x")
@@ -210,15 +205,11 @@ class Workbench:
             ttk.Entry(form, textvariable=self.values[field], state=state).grid(row=row, column=1, sticky="ew")
             self.values[field].trace_add("write", self.changed)
         form.columnconfigure(1, weight=1)
-        ttk.Label(form, textvariable=self.preview, wraplength=450).grid(
-            row=len(FIELDS), column=0, columnspan=2, sticky="w", pady=8
-        )
         self.show()
 
     def changed(self, *_):
         if self.records and not self.loading:
             self.dirty = True
-            self.preview.set("")
 
     def discard(self):
         return not self.dirty or messagebox.askyesno(
@@ -356,12 +347,24 @@ class Workbench:
             if not folder:
                 return
             targets = batch_targets(self.images, Path(folder))
+        self.save_images(targets, title="Decrypt Images", formats=("JPEG",))
+
+    def download_all_images(self):
+        title = "Download all images"
+        if not self.images:
+            messagebox.showinfo(title, "Open an image or folder first.", parent=self.root)
+            return
+        folder = filedialog.askdirectory(title="Choose where to save all loaded images", parent=self.root)
+        if folder:
+            self.save_images(batch_targets(self.images, Path(folder)), title=title, formats=("JPEG", "PNG"))
+
+    def save_images(self, targets, *, title, formats):
         saved = skipped = 0
         errors = []
         for source, target in zip(self.images, targets):
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                save_jpeg(source, target, self.key_for(source))
+                save_image(source, target, self.key_for(source), formats=formats)
                 saved += 1
             except FileExistsError:
                 skipped += 1
@@ -369,27 +372,9 @@ class Workbench:
                 errors.append(f"{source.name}: {error}")
         summary = f"Saved {saved}, skipped {skipped} existing files, failed {len(errors)}."
         if errors:
-            messagebox.showwarning("Decrypt Images", summary + "\n\n" + "\n".join(errors[:5]))
+            messagebox.showwarning(title, summary + "\n\n" + "\n".join(errors[:5]), parent=self.root)
         else:
-            messagebox.showinfo("Decrypt Images", summary)
-
-    def read_scan(self):
-        if not self.images:
-            messagebox.showinfo("Read scan text", "Open a scan first.")
-            return
-        try:
-            source = self.images[self.index]
-            fields = read_fields(source, self.key_for(source))
-        except (OSError, ValueError, TimeoutExpired) as error:
-            messagebox.showerror("Read scan text", str(error))
-            return
-        if not fields:
-            messagebox.showinfo("Read scan text", "No labeled fields found. Enter the values from the image before exporting.")
-            return
-        for field, value in fields.items():
-            if not self.values[field].get() or field == "Record No" and self.values[field].get() == self.images[self.index].stem:
-                self.values[field].set(value)
-        self.preview.set("Review the extracted values against the image before exporting.")
+            messagebox.showinfo(title, summary, parent=self.root)
 
     def set_key(self):
         text = simpledialog.askstring(
@@ -507,7 +492,6 @@ class Workbench:
             value = record.get(field)
             variable.set("" if value is None else str(value))
         self.loading = False
-        self.preview.set("")
         if self.records:
             self.scan_list.selection_clear(0, "end")
             self.scan_list.selection_set(self.index)
@@ -529,11 +513,6 @@ class Workbench:
                 self.image_label.configure(text=f"{path.name}\n{error}", wraplength=480)
         elif self.records:
             self.image_label.configure(text="Excel import")
-
-    def check(self):
-        if self.records:
-            self.capture()
-            self.preview.set(normalize(self.records[self.index])[-1])
 
     def save(self):
         if self.images:
@@ -600,8 +579,8 @@ class Workbench:
     def save_grid(self):
         mi_path = find_mi_workbook(self.images, self.imported_workbook_path, self.source_session_choice)
         if mi_path is None:
-            mi_path = self.choose_mi()
-        if mi_path is not None:
+            self.export_scan_batch(None, recover=True)
+        else:
             self.export_scan_batch(mi_path)
 
     def export_ocr_review(self):
@@ -610,8 +589,9 @@ class Workbench:
             return
         self.export_scan_batch(None)
 
-    def export_scan_batch(self, mi_path):
-        title = "Export Excel" if mi_path is not None else "Export OCR review"
+    def export_scan_batch(self, mi_path, *, recover=False):
+        ocr_only = mi_path is None and not recover
+        title = "Export OCR review" if ocr_only else "Export Excel"
         try:
             destination = Path.home() / "Downloads" / "KYC Exports"
             destination.mkdir(parents=True, exist_ok=True)
@@ -622,6 +602,8 @@ class Workbench:
         folders = {image.parent for image in self.images}
         batch_name = (self.images[0].parent.name or "Batch") if len(folders) == 1 else "Combined"
         prefix = "KYC" if mi_path is not None else "KYC_OCR"
+        if recover:
+            prefix = "KYC_Recovered"
         filename = destination / f"{prefix}_{batch_name}_{datetime.now():%Y%m%d_%H%M%S_%f}.xlsx"
         scans = []
         for image in self.images:
@@ -642,7 +624,9 @@ class Workbench:
 
         def run():
             try:
-                result = export_grid(filename, scans, mi_path, lambda count: events.put(("progress", count)))
+                result = export_grid(
+                    filename, scans, mi_path, lambda count: events.put(("progress", count)), recover=recover
+                )
                 events.put(("done", result))
             except Exception as error:
                 events.put(("error", str(error)))
@@ -663,21 +647,26 @@ class Workbench:
                     messagebox.showerror(title, value)
                 else:
                     rows, flagged = value
-                    if mi_path is not None and not rows:
+                    if not ocr_only and not rows:
                         messagebox.showwarning(
                             title,
-                            "No KYC records matched the source workbook. Check that the source workbook covers "
-                            "this batch and review the scan results.\n\n"
-                            f"Scan review saved to {filename}",
+                            "No KYC records matched a verified source. Check Scan review and any rows marked "
+                            "REVIEW in KYC Data.\n\n"
+                            f"Workbook saved to {filename}",
                             parent=self.root,
                         )
                         return
-                    row_label = "matched KYC rows" if mi_path is not None else "OCR-detected record IDs"
+                    row_label = "OCR-detected record IDs" if ocr_only else "matched KYC rows"
+                    source_note = (
+                        "Rows marked REVIEW contain an OCR ID and still need source data. "
+                        "Pages without a readable ID appear in Scan review.\n\n"
+                        if recover else ""
+                    )
                     messagebox.showinfo(
                         title,
                         f"Included all {len(scans):,} loaded scans in Scan review and saved {rows:,} {row_label}. "
                         f"{flagged:,} scans need review.\n\nSaved to {filename}\n\n"
-                        "Check the Scan review sheet against the original images.",
+                        f"{source_note}Check the Scan review sheet against the original images.",
                     )
                 return
 

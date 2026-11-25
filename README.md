@@ -7,17 +7,19 @@ python -m pip install -r requirements.txt
 python app.py
 ```
 
-Choose **Open image** for one scan or **Open folder** for a batch. To combine batches, use **Open multiple folders**, click **Add folder** for each folder, and select **Open folders**. The app uses each folder's configured key and combines all rows into one Excel export. JPEGs saved from multiple folders go into numbered subfolders so repeated filenames stay separate. The supplied Client 2 key is built in. **Decrypt Images** saves a verified JPEG or saves verified JPEGs into a folder you choose. Use an output drive with hard link support, such as NTFS.
+Choose **Open image** for one scan or **Open folder** for a batch. To combine batches, use **Open multiple folders**, click **Add folder** for each folder, and select **Open folders**. The app uses each folder's configured key and combines all rows into one Excel export. **Download all images** saves all loaded scans as readable JPEG or PNG files in the folder you choose. Images from multiple folders go into numbered subfolders so repeated filenames stay separate. **File > Decrypt Images...** also offers a JPEG-only export. Use an output drive with hard link support, such as NTFS.
 
 ## Export records from Client 2 grid pages
 
 1. Open your encrypted JPG folder and check that the page preview is readable.
-2. Click **Export Excel**. If the source workbook picker opens, select the original numbered **KYC MI** workbook. Cancelling the picker cancels the export. This step uses local Tesseract OCR or the installed Windows OCR language.
-3. The app reads printed record IDs and uses the matching MI rows to populate the 22 columns, with one row per matched ID on each image. Image Name holds the page number. The **Scan review** sheet lists the source pages, counts and unmatched IDs. Compare against the source pages because OCR may miss or misread IDs.
+2. Click **Export Excel**. The app finds a numbered **KYC MI** workbook automatically. When no MI workbook is available, it looks for earlier matched exports in **Downloads > KYC Exports** and recovers rows with the same scan folder name, filename and printed record ID. This step uses local Tesseract OCR or the installed Windows OCR language.
+3. The app reads printed record IDs and uses the matching MI rows to populate the 22 columns. On ruled two-column scans, a second OCR pass reads the ID area of both columns. Records follow each numbered grid row from left to right. Image Name holds the page number. **Scan review** lists unmatched IDs and flags gaps between detected numbers for comparison with the original pages.
 
 Use **File > Export OCR review...** to save raw OCR text and detected record IDs for troubleshooting. That workbook has **Scan review** and **Detected IDs** sheets.
 
-For manually entered or labeled forms, use **File > Export reviewed form rows**. **Read scan text** can prefill explicitly labeled values, and **Check row** previews remarks.
+Recovered workbooks start with `KYC_Recovered_`. Complete detected IDs without a verified source row keep their original scan number in **KYC Data**, with blank data fields and a **REVIEW** remark. Partial IDs and scans with no readable ID appear in **Scan review**. The export button runs without a source picker. You can set a numbered source explicitly from **File > Change source workbook...**.
+
+For manually entered or labeled forms, use **File > Export reviewed form rows**.
 
 For a readable XLSX, choose its worksheet and header row, then map the actual columns. The example workbook uses numbered headers, so its mapping needs to be supplied by the operator. Exact named-header matches are preselected. Ensure identifier, postal code and phone columns are stored as text to preserve leading zeros.
 

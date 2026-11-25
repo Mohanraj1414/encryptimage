@@ -1,12 +1,14 @@
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import Mock, patch
 
 from openpyxl import Workbook, load_workbook
+from PIL import Image, ImageDraw
 
 import app
-from grid_records import MI_FIELDS, MI_HEADERS, export_grid
+from grid_records import MI_FIELDS, MI_HEADERS, canonical_id, export_grid, match_ids
 from kyc import FIELDS
 
 
@@ -39,6 +41,7 @@ class GridExportTests(unittest.TestCase):
 
     def test_finds_documented_source_beside_app_from_another_folder(self):
         source = self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
+        source.with_name("~$" + source.name).write_bytes(b"Excel owner file")
         self.assertEqual(app.find_mi_workbook([self.scan], None), source)
 
     def test_explicit_choices_keep_priority_over_app_source(self):
@@ -58,19 +61,11 @@ class GridExportTests(unittest.TestCase):
         self.make_source(self.scans / "KYC MI other.xlsx")
         self.assertIsNone(app.find_mi_workbook([self.scan], None))
 
-    def test_cancelled_source_picker_does_not_run_any_export(self):
-        workbench = app.Workbench.__new__(app.Workbench)
-        workbench.root = Mock()
-        workbench.images = [self.scan]
-        workbench.imported_workbook_path = None
-        workbench.source_session_choice = None
-        workbench.choose_mi = Mock(return_value=None)
-        workbench.export_scan_batch = Mock()
-        workbench.save_reviewed_rows = Mock()
-        workbench.save_grid()
-        workbench.choose_mi.assert_called_once()
-        workbench.export_scan_batch.assert_not_called()
-        workbench.save_reviewed_rows.assert_not_called()
+    def test_grid_export_uses_recovery_without_opening_picker(self):
+        workbench = Mock(images=[self.scan], imported_workbook_path=None, source_session_choice=None)
+        app.Workbench.save_grid(workbench)
+        workbench.choose_mi.assert_not_called()
+        workbench.export_scan_batch.assert_called_once_with(None, recover=True)
 
     def test_grid_export_uses_discovered_source_and_ocr_review_is_explicit(self):
         source = self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
@@ -115,6 +110,119 @@ class GridExportTests(unittest.TestCase):
         self.assertEqual(values[:5], ("HnT_DuP-AkyZ-2001", "Test Account", "N.A", "1", "Synthetic Person"))
         _, first_page, second_page = workbook["Scan review"].values
         self.assertEqual((first_page[2], second_page[2], second_page[3]), (1, 0, "HnT_DuP-AkyZ-9999"))
+
+    def test_recovers_exact_scan_and_id_with_current_page_number(self):
+        archived = self.root / "KYC_images_20261123_131254_062641.xlsx"
+        output = self.root / "KYC_Recovered.xlsx"
+        identifier = "HnT_DuP-AkyZ-2001"
+        record = {"Record No": identifier, "Image Name": "15", "Full Name": "SYNTHETIC PERSON"}
+        app.export(archived, [record], [[15, f"001_images/{self.scan.name}", 1, "", "Review"]])
+        other = self.scans / "other.jpg"
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.scan_bytes", return_value=b""),
+            patch("grid_records.ocr_text", return_value=identifier),
+        ):
+            self.assertEqual(export_grid(output, [(other, None), (self.scan, None)], None, Mock(), recover=True), (1, 1))
+        book = load_workbook(output, read_only=True)
+        self.addCleanup(book.close)
+        _, pending, recovered = book["KYC Data"].values
+        self.assertEqual(pending[:5], (identifier, None, None, "1", None))
+        self.assertEqual(pending[-1], "REVIEW: No source data for this record ID")
+        self.assertEqual(recovered[:5], (identifier, "N.A", "N.A", "2", "Synthetic Person"))
+        _, first, second = book["Scan review"].values
+        self.assertEqual((first[2], first[3], second[2]), (0, identifier, 1))
+
+    def test_recovery_without_prior_export_keeps_full_ids_and_reviews_unreadable_pages(self):
+        output = self.root / "KYC_Recovered.xlsx"
+        unreadable = self.scans / "unreadable.jpg"
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.scan_bytes", side_effect=lambda path, key: path.name.encode()),
+            patch("grid_records.ocr_text", side_effect=lambda engine, name, mode: (
+                "HnT_DuP-AkyZ-2001" if name.decode() == self.scan.name else "DuP-Akyz-2002"
+            )),
+        ):
+            self.assertEqual(
+                export_grid(output, [(self.scan, None), (unreadable, None)], None, Mock(), recover=True), (0, 2)
+            )
+        book = load_workbook(output, read_only=True)
+        self.addCleanup(book.close)
+        _, pending = book["KYC Data"].values
+        self.assertEqual((pending[0], pending[3]), ("HnT_DuP-AkyZ-2001", "1"))
+        _, first, second = book["Scan review"].values
+        self.assertEqual((first[0], first[2], second[0], second[3]), (1, 0, 2, "DuP-Akyz-2002"))
+
+    def test_page_ids_are_sorted_and_fragmentary_ids_and_gaps_are_reported(self):
+        ids = ["HnT_DuP-AkyZ-3968", "HnT_DuP-AkyZ-3970", "HnT_DuP-AkyZ-3969"]
+        records = {canonical_id(identifier): identifier for identifier in ids}
+        text = (
+            "HnT_DuP-AkyZ-3968 HnT_DuP-AkyZ-3970 "
+            "garbled _ DuP-Akyz-3969 HTIT Dup-Akyz-3973 HnT_DuP-AkyZ-3973"
+        )
+        matched, unmatched, gaps = match_ids(text, records)
+        self.assertEqual(matched, sorted(ids))
+        self.assertEqual(unmatched, ["HnT_DuP-AkyZ-3973"])
+        self.assertEqual(gaps, ["3971-3972"])
+
+    def test_fragmentary_ids_without_source_are_unmatched(self):
+        matched, unmatched, gaps = match_ids("garbled _ DuP-Akyz-3971", {})
+        self.assertEqual(matched, [])
+        self.assertEqual(unmatched, ["DuP-Akyz-3971"])
+        self.assertEqual(gaps, [])
+
+    def test_export_keeps_dob_and_email_in_their_cells_and_closes_y_gaps(self):
+        output = self.root / "fields.xlsx"
+        record = {
+            "Date Of Birth": "Tuesday, 08/15/1939",
+            "Gender": "Male",
+            "Email": "synthetic.person@example.org",
+            "Contact 1": "(130) 959-7595",
+            "Center Name": "SYNTHETIC CENTER",
+            "Center Code": "AB Y CD ef yZ",
+        }
+        app.export(output, [record, {**record, "Center Code": "N.A"}], normalized=True)
+        book = load_workbook(output)
+        self.addCleanup(book.close)
+        sheet = book["KYC Data"]
+        self.assertEqual((sheet["G2"].value, sheet["H2"].value), (record["Date Of Birth"], "Male"))
+        self.assertEqual((sheet["O2"].value, sheet["P2"].value), (record["Email"], record["Contact 1"]))
+        self.assertTrue(sheet["G2"].alignment.wrap_text and sheet["O2"].alignment.wrap_text)
+        self.assertGreaterEqual(sheet.column_dimensions["G"].width, 26)
+        self.assertGreaterEqual(sheet.column_dimensions["O"].width, 42)
+        self.assertEqual((sheet["T2"].value, sheet["U2"].value, sheet["U3"].value),
+                         ("SYNTHETIC CENTER", "ABYCD efyZ", "N.A"))
+
+    def test_export_interleaves_numbered_grid_columns_and_keeps_image_number(self):
+        output = self.root / "KYC_Recovered.xlsx"
+        ids = [f"HnT_DuP-AkyZ-{number}" for number in range(7700, 7706)]
+        with BytesIO() as file, Image.new("L", (400, 500), 255) as grid:
+            draw = ImageDraw.Draw(grid)
+            draw.line((8, 12, 8, 480), fill=0)
+            draw.line((200, 12, 200, 480), fill=0)
+            for y in range(12, 480, 78):
+                draw.line((8, y, 392, y), fill=0)
+            grid.save(file, format="PNG")
+            payload = file.getvalue()
+        # Whole-page OCR misses the left column. The cell-header OCR supplies it.
+        def recognize(engine, image, mode):
+            if mode == 11:
+                self.assertEqual(image, payload)
+                return " ".join(ids[1::2])
+            self.assertNotEqual(image, payload)
+            return " ".join(ids[::2])
+
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.scan_bytes", return_value=payload),
+            patch("grid_records.ocr_text", side_effect=recognize),
+        ):
+            export_grid(output, [(self.scan, None)], None, Mock(), recover=True)
+        book = load_workbook(output, read_only=True)
+        self.addCleanup(book.close)
+        values = iter(book["KYC Data"].values)
+        self.assertEqual(next(values), FIELDS)
+        self.assertEqual([(row[0], row[3]) for row in values], [(identifier, "1") for identifier in ids])
 
 
 if __name__ == "__main__":
