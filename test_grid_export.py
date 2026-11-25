@@ -203,7 +203,7 @@ class GridExportTests(unittest.TestCase):
         self.assertEqual(unmatched, ["DuP-Akyz-3971"])
         self.assertEqual(gaps, [])
 
-    def test_export_keeps_dob_and_email_in_their_cells_and_closes_y_gaps(self):
+    def test_export_keeps_dob_and_email_in_their_cells_and_preserves_center_code(self):
         output = self.root / "fields.xlsx"
         record = {
             "Date Of Birth": "Tuesday, 08/15/1939",
@@ -223,7 +223,7 @@ class GridExportTests(unittest.TestCase):
         self.assertGreaterEqual(sheet.column_dimensions["G"].width, 26)
         self.assertGreaterEqual(sheet.column_dimensions["O"].width, 42)
         self.assertEqual((sheet["T2"].value, sheet["U2"].value, sheet["U3"].value),
-                         ("SYNTHETIC CENTER", "ABYCD efyZ", "N.A"))
+                         ("SYNTHETIC CENTER", "AB Y CD ef yZ", "N.A"))
 
     def test_export_interleaves_numbered_grid_columns_and_keeps_image_number(self):
         output = self.root / "KYC_Recovered.xlsx"

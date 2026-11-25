@@ -148,8 +148,6 @@ def export(path, records, scan_report=None, duplicates=(), *, scan_ocr=None, nor
             row = []
             values = (str(record.get(field) or "") for field in FIELDS) if normalized else normalize(record)
             for field, value in zip(FIELDS, values):
-                if field == "Center Code":
-                    value = re.sub(r"\s+(?=[Yy])|(?<=[Yy])\s+", "", value)
                 cell = WriteOnlyCell(sheet, value=value)
                 cell.data_type = "s"
                 if field in {"Date Of Birth", "Email"}:
