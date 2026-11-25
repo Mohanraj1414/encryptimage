@@ -2,6 +2,7 @@
 from datetime import datetime
 import json
 import os
+import sys
 from pathlib import Path
 from queue import Empty, SimpleQueue
 from threading import Thread
@@ -19,7 +20,7 @@ from grid_records import MI_HEADERS, export_grid
 
 from image_reader import configured_key, legacy_key, load_scan
 
-from kyc import FIELDS, export, read_sheet
+from kyc import FIELDS, MISSING, export, read_sheet
 
 
 def mi_settings_path():
@@ -90,7 +91,8 @@ def find_mi_workbook(images, imported_path, session_choice=None):
 
     # An explicit menu choice is retained for this session if saving failed.
     saved_path = session_choice or read_mi_path()
-    app_source = Path(__file__).resolve().with_name("KYC_MI_Source.xlsx")
+    app_file = sys.executable if getattr(sys, "frozen", False) else __file__
+    app_source = Path(app_file).resolve().with_name("KYC_MI_Source.xlsx")
     for path in (saved_path, imported_path, app_source):
         if path is not None and is_valid(path):
             return path
@@ -525,6 +527,16 @@ class Workbench:
             messagebox.showinfo("Export Excel", "Load records before exporting.")
             return
         self.capture()
+        if self.images and not any(
+            str(record.get("Record No") or "").strip().casefold() not in MISSING | {image.stem.casefold()}
+            or any(
+                str(value if value is not None else "").strip().casefold() not in MISSING
+                for field, value in record.items() if field not in {"Record No", "Image Name"}
+            )
+            for image, record in zip(self.images, self.records)
+        ):
+            self.save_grid()
+            return
         path = filedialog.asksaveasfilename(
             defaultextension=".xlsx", initialfile="KYC_Output.xlsx", filetypes=[("Excel workbook", "*.xlsx")]
         )

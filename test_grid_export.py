@@ -44,6 +44,15 @@ class GridExportTests(unittest.TestCase):
         source.with_name("~$" + source.name).write_bytes(b"Excel owner file")
         self.assertEqual(app.find_mi_workbook([self.scan], None), source)
 
+    def test_packaged_app_finds_source_next_to_executable(self):
+        source = self.make_source(self.root / "KYC_MI_Source.xlsx")
+        self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
+        with (
+            patch.object(app.sys, "frozen", True, create=True),
+            patch.object(app.sys, "executable", str(self.root / "KYC_Excel_Automator.exe")),
+        ):
+            self.assertEqual(app.find_mi_workbook([self.scan], None), source)
+
     def test_explicit_choices_keep_priority_over_app_source(self):
         self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
         imported = self.make_source(self.root / "imported.xlsx")
@@ -77,6 +86,27 @@ class GridExportTests(unittest.TestCase):
         workbench.export_scan_batch.reset_mock()
         app.Workbench.export_ocr_review(workbench)
         workbench.export_scan_batch.assert_called_once_with(None)
+
+    def test_unedited_scan_forms_go_through_grid_export(self):
+        workbench = Mock(
+            images=[self.scan],
+            records=[{"Record No": self.scan.stem, "Image Name": "1"}],
+        )
+        with patch.object(app.filedialog, "asksaveasfilename", return_value="") as picker:
+            app.Workbench.save_reviewed_rows(workbench)
+        workbench.capture.assert_called_once()
+        workbench.save_grid.assert_called_once()
+        picker.assert_not_called()
+
+    def test_manually_entered_scan_form_can_still_be_exported(self):
+        workbench = Mock(
+            images=[self.scan],
+            records=[{"Record No": self.scan.stem, "Image Name": "1", "Full Name": "Synthetic Person"}],
+        )
+        with patch.object(app.filedialog, "asksaveasfilename", return_value="") as picker:
+            app.Workbench.save_reviewed_rows(workbench)
+        workbench.save_grid.assert_not_called()
+        picker.assert_called_once()
 
     def test_picker_rejects_generated_output_and_remembers_valid_source(self):
         output = self.root / "generated.xlsx"

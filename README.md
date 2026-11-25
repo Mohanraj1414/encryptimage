@@ -19,7 +19,7 @@ Use **File > Export OCR review...** to save raw OCR text and detected record IDs
 
 Recovered workbooks start with `KYC_Recovered_`. Complete detected IDs without a verified source row keep their original scan number in **KYC Data**, with blank data fields and a **REVIEW** remark. Partial IDs and scans with no readable ID appear in **Scan review**. The export button runs without a source picker. You can set a numbered source explicitly from **File > Change source workbook...**.
 
-For manually entered or labeled forms, use **File > Export reviewed form rows**.
+For manually entered or labeled forms, use **File > Export reviewed form rows**. If the loaded scans have no entered values, this command runs the grid export.
 
 For a readable XLSX, choose its worksheet and header row, then map the actual columns. The example workbook uses numbered headers, so its mapping needs to be supplied by the operator. Exact named-header matches are preselected. Ensure identifier, postal code and phone columns are stored as text to preserve leading zeros.
 
@@ -41,4 +41,4 @@ Scroll the loaded scans list and click a scan to open it. Use the preview scroll
 
 ## Local source workbook for Excel export
 
-Keep the original KYC MI workbook beside `app.py` as `KYC_MI_Source.xlsx` for automatic discovery. A valid remembered source or a valid workbook imported in the current session takes priority. Use **File > Change source workbook...** to select a different source. Output is saved in **Downloads > KYC Exports**. Keep the workbook local because it contains KYC records.
+Keep the original KYC MI workbook as `KYC_MI_Source.xlsx` beside `app.py` or beside the packaged Workbench executable for automatic discovery. A valid remembered source or a valid workbook imported in the current session takes priority. Use **File > Change source workbook...** to select a different source. Output is saved in **Downloads > KYC Exports**. Keep the workbook local because it contains KYC records.
