@@ -135,9 +135,11 @@ class GridExportTests(unittest.TestCase):
         self.assertEqual([call.args for call in progress.call_args_list], [(1,), (2,)])
         workbook = load_workbook(output, read_only=True)
         self.addCleanup(workbook.close)
-        headers, values = workbook["KYC Data"].values
+        headers, values, review = workbook["KYC Data"].values
         self.assertEqual(headers, FIELDS)
         self.assertEqual(values[:5], ("HnT_DuP-AkyZ-2001", "Test Account", "N.A", "1", "Synthetic Person"))
+        self.assertEqual(review[:5], ("HnT_DuP-AkyZ-9999", None, None, "2", None))
+        self.assertEqual(review[-1], "REVIEW: No source data for this record ID")
         _, first_page, second_page = workbook["Scan review"].values
         self.assertEqual((first_page[2], second_page[2], second_page[3]), (1, 0, "HnT_DuP-AkyZ-9999"))
 

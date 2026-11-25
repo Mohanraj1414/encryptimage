@@ -670,9 +670,8 @@ class Workbench:
                         return
                     row_label = "OCR-detected record IDs" if ocr_only else "matched KYC rows"
                     source_note = (
-                        "Rows marked REVIEW contain an OCR ID and still need source data. "
-                        "Pages without a readable ID appear in Scan review.\n\n"
-                        if recover else ""
+                        "Rows marked REVIEW contain an OCR ID and still need source data.\n\n"
+                        if not ocr_only else ""
                     )
                     messagebox.showinfo(
                         title,

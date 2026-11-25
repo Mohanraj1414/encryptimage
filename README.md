@@ -17,7 +17,7 @@ Choose **Open image** for one scan or **Open folder** for a batch. To combine ba
 
 Use **File > Export OCR review...** to save raw OCR text and detected record IDs for troubleshooting. That workbook has **Scan review** and **Detected IDs** sheets.
 
-Recovered workbooks start with `KYC_Recovered_`. Complete detected IDs without a verified source row keep their original scan number in **KYC Data**, with blank data fields and a **REVIEW** remark. Partial IDs and scans with no readable ID appear in **Scan review**. The export button runs without a source picker. You can set a numbered source explicitly from **File > Change source workbook...**.
+Recovered workbooks start with `KYC_Recovered_`. In a recovered workbook, or on any scan with no matches in the MI workbook, complete detected IDs keep their original scan number in **KYC Data**, with blank data fields and a **REVIEW** remark. Partial IDs and scans with no readable ID appear in **Scan review**. The export button runs without a source picker. You can set a numbered source explicitly from **File > Change source workbook...**.
 
 For manually entered or labeled forms, use **File > Export reviewed form rows**. If the loaded scans have no entered values, this command runs the grid export.
 
