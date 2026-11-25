@@ -12,7 +12,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from PIL import Image
 
 from image_reader import open_image, scan_bytes
-from kyc import FIELDS, MISSING, export
+from kyc import FIELDS, MISSING, export, normalize
 from scan_ocr import ocr_text, tesseract_path
 
 MI_HEADERS = ("ID", *range(1, 17), 18, 19, 20, 21)
@@ -235,21 +235,25 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
         for number, (matched, unmatched, gaps, text, error) in enumerate(pool.map(recognize, scans), 1):
             image = scans[number - 1][0]
             matched_count += len(matched)
-            page_records = matched
-            if recover:
+            page_records = [{**row, "Image Name": str(number)} for row in matched]
+            if not recover:
+                page_records = [dict(zip(FIELDS, normalize(row))) for row in page_records]
+            if recover or (mi_path is not None and not matched):
                 review_rows = [
-                    {"Record No": identifier, "Remark": "REVIEW: No source data for this record ID"}
+                    {"Record No": identifier, "Image Name": str(number),
+                     "Remark": "REVIEW: No source data for this record ID"}
                     for identifier in unmatched if PRINTED_ID.fullmatch(identifier)
                 ]
-                page_records = sorted(
-                    [*matched, *review_rows], key=lambda row: record_order(canonical_id(row["Record No"]))
-                )
-            records.extend({**row, "Image Name": str(number)} for row in page_records)
+                page_records.extend(review_rows)
+                page_records.sort(key=lambda row: record_order(canonical_id(row["Record No"])))
+            records.extend(page_records)
             source = f"{folder_numbers[image.parent]:03d}_{image.parent.name}/{image.name}"
             if ocr_only:
                 scan_ocr.append((number, source, [str(u) for u in unmatched if u is not None], text, error))
             else:
-                status = error or ("No record IDs matched" if not matched else "Check against the page")
+                status = error or (
+                    "Check against the page" if matched else "No source match. Review the detected IDs."
+                )
                 if gaps:
                     status += ". Check ID gaps: " + ", ".join(str(g) for g in gaps if g is not None)
                 report.append([number, source, len(matched), ", ".join(str(u) for u in unmatched if u is not None), status])
@@ -262,5 +266,5 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
         )
     counts = Counter(record["Record No"] for record in records)
     duplicates = {key for key, count in counts.items() if count > 1}
-    export(path, records, report, sorted(duplicates), normalized=recover)
+    export(path, records, report, sorted(duplicates), normalized=True)
     return matched_count, flagged

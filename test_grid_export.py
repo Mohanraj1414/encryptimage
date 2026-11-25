@@ -44,6 +44,15 @@ class GridExportTests(unittest.TestCase):
         source.with_name("~$" + source.name).write_bytes(b"Excel owner file")
         self.assertEqual(app.find_mi_workbook([self.scan], None), source)
 
+    def test_packaged_app_finds_source_next_to_executable(self):
+        source = self.make_source(self.root / "KYC_MI_Source.xlsx")
+        self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
+        with (
+            patch.object(app.sys, "frozen", True, create=True),
+            patch.object(app.sys, "executable", str(self.root / "KYC_Excel_Automator.exe")),
+        ):
+            self.assertEqual(app.find_mi_workbook([self.scan], None), source)
+
     def test_explicit_choices_keep_priority_over_app_source(self):
         self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
         imported = self.make_source(self.root / "imported.xlsx")
@@ -78,6 +87,27 @@ class GridExportTests(unittest.TestCase):
         app.Workbench.export_ocr_review(workbench)
         workbench.export_scan_batch.assert_called_once_with(None)
 
+    def test_unedited_scan_forms_go_through_grid_export(self):
+        workbench = Mock(
+            images=[self.scan],
+            records=[{"Record No": self.scan.stem, "Image Name": "1"}],
+        )
+        with patch.object(app.filedialog, "asksaveasfilename", return_value="") as picker:
+            app.Workbench.save_reviewed_rows(workbench)
+        workbench.capture.assert_called_once()
+        workbench.save_grid.assert_called_once()
+        picker.assert_not_called()
+
+    def test_manually_entered_scan_form_can_still_be_exported(self):
+        workbench = Mock(
+            images=[self.scan],
+            records=[{"Record No": self.scan.stem, "Image Name": "1", "Full Name": "Synthetic Person"}],
+        )
+        with patch.object(app.filedialog, "asksaveasfilename", return_value="") as picker:
+            app.Workbench.save_reviewed_rows(workbench)
+        workbench.save_grid.assert_not_called()
+        picker.assert_called_once()
+
     def test_picker_rejects_generated_output_and_remembers_valid_source(self):
         output = self.root / "generated.xlsx"
         app.export(output, [{"Record No": self.scan.stem, "Image Name": "1"}])
@@ -105,9 +135,11 @@ class GridExportTests(unittest.TestCase):
         self.assertEqual([call.args for call in progress.call_args_list], [(1,), (2,)])
         workbook = load_workbook(output, read_only=True)
         self.addCleanup(workbook.close)
-        headers, values = workbook["KYC Data"].values
+        headers, values, review = workbook["KYC Data"].values
         self.assertEqual(headers, FIELDS)
         self.assertEqual(values[:5], ("HnT_DuP-AkyZ-2001", "Test Account", "N.A", "1", "Synthetic Person"))
+        self.assertEqual(review[:5], ("HnT_DuP-AkyZ-9999", None, None, "2", None))
+        self.assertEqual(review[-1], "REVIEW: No source data for this record ID")
         _, first_page, second_page = workbook["Scan review"].values
         self.assertEqual((first_page[2], second_page[2], second_page[3]), (1, 0, "HnT_DuP-AkyZ-9999"))
 
@@ -171,7 +203,7 @@ class GridExportTests(unittest.TestCase):
         self.assertEqual(unmatched, ["DuP-Akyz-3971"])
         self.assertEqual(gaps, [])
 
-    def test_export_keeps_dob_and_email_in_their_cells_and_closes_y_gaps(self):
+    def test_export_keeps_dob_and_email_in_their_cells_and_preserves_center_code(self):
         output = self.root / "fields.xlsx"
         record = {
             "Date Of Birth": "Tuesday, 08/15/1939",
@@ -191,7 +223,7 @@ class GridExportTests(unittest.TestCase):
         self.assertGreaterEqual(sheet.column_dimensions["G"].width, 26)
         self.assertGreaterEqual(sheet.column_dimensions["O"].width, 42)
         self.assertEqual((sheet["T2"].value, sheet["U2"].value, sheet["U3"].value),
-                         ("SYNTHETIC CENTER", "ABYCD efyZ", "N.A"))
+                         ("SYNTHETIC CENTER", "AB Y CD ef yZ", "N.A"))
 
     def test_export_interleaves_numbered_grid_columns_and_keeps_image_number(self):
         output = self.root / "KYC_Recovered.xlsx"
