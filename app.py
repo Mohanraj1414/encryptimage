@@ -57,11 +57,8 @@ def validate_mi_headers(path):
         raise ValueError("Choose an original .xlsx workbook. Excel temporary files are excluded.")
     if not path.is_file():
         raise ValueError("The workbook was moved, deleted or is unavailable.")
-    lock_names = ("~$" + path.name, "~$" + path.name[2:])
-    if any(path.with_name(name).exists() for name in lock_names):
-        raise ValueError("Close the workbook in Excel and try again.")
-
-    # Use the same first-sheet schema as grid_records.load_mi.
+    # Excel's owner file can outlive the editing session. Use actual read
+    # access and the same first-sheet schema as grid_records.load_mi.
     try:
         with path.open("rb") as source:
             workbook = load_workbook(source, read_only=True, data_only=True)

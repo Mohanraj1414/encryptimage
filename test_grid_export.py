@@ -41,6 +41,7 @@ class GridExportTests(unittest.TestCase):
 
     def test_finds_documented_source_beside_app_from_another_folder(self):
         source = self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
+        source.with_name("~$" + source.name).write_bytes(b"Excel owner file")
         self.assertEqual(app.find_mi_workbook([self.scan], None), source)
 
     def test_explicit_choices_keep_priority_over_app_source(self):
@@ -169,6 +170,28 @@ class GridExportTests(unittest.TestCase):
         self.assertEqual(matched, [])
         self.assertEqual(unmatched, ["DuP-Akyz-3971"])
         self.assertEqual(gaps, [])
+
+    def test_export_keeps_dob_and_email_in_their_cells_and_closes_y_gaps(self):
+        output = self.root / "fields.xlsx"
+        record = {
+            "Date Of Birth": "Tuesday, 08/15/1939",
+            "Gender": "Male",
+            "Email": "synthetic.person@example.org",
+            "Contact 1": "(130) 959-7595",
+            "Center Name": "SYNTHETIC CENTER",
+            "Center Code": "AB Y CD ef yZ",
+        }
+        app.export(output, [record, {**record, "Center Code": "N.A"}], normalized=True)
+        book = load_workbook(output)
+        self.addCleanup(book.close)
+        sheet = book["KYC Data"]
+        self.assertEqual((sheet["G2"].value, sheet["H2"].value), (record["Date Of Birth"], "Male"))
+        self.assertEqual((sheet["O2"].value, sheet["P2"].value), (record["Email"], record["Contact 1"]))
+        self.assertTrue(sheet["G2"].alignment.wrap_text and sheet["O2"].alignment.wrap_text)
+        self.assertGreaterEqual(sheet.column_dimensions["G"].width, 26)
+        self.assertGreaterEqual(sheet.column_dimensions["O"].width, 42)
+        self.assertEqual((sheet["T2"].value, sheet["U2"].value, sheet["U3"].value),
+                         ("SYNTHETIC CENTER", "ABYCD efyZ", "N.A"))
 
     def test_export_interleaves_numbered_grid_columns_and_keeps_image_number(self):
         output = self.root / "KYC_Recovered.xlsx"

@@ -5,7 +5,7 @@ from tempfile import NamedTemporaryFile
 import re
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 FIELDS = (
@@ -133,9 +133,10 @@ def export(path, records, scan_report=None, duplicates=(), *, scan_ocr=None, nor
         sheet = workbook.create_sheet("KYC Data")
         sheet.freeze_panes = "F2"
 
+        widths = {"Date Of Birth": 26, "Email": 42, "Center Code": 42, "Remark": 55}
+        wrap = Alignment(wrap_text=True, vertical="center")
         for index, field in enumerate(FIELDS, 1):
-            sheet.column_dimensions[get_column_letter(index)].width = max(17, len(field) + 3)
-        sheet.column_dimensions["V"].width = 55
+            sheet.column_dimensions[get_column_letter(index)].width = widths.get(field, max(17, len(field) + 3))
         titles = []
         for field in FIELDS:
             cell = WriteOnlyCell(sheet, value=field)
@@ -146,9 +147,13 @@ def export(path, records, scan_report=None, duplicates=(), *, scan_ocr=None, nor
         for record in records:
             row = []
             values = (str(record.get(field) or "") for field in FIELDS) if normalized else normalize(record)
-            for value in values:
+            for field, value in zip(FIELDS, values):
+                if field == "Center Code":
+                    value = re.sub(r"\s+(?=[Yy])|(?<=[Yy])\s+", "", value)
                 cell = WriteOnlyCell(sheet, value=value)
                 cell.data_type = "s"
+                if field in {"Date Of Birth", "Email"}:
+                    cell.alignment = wrap
                 row.append(cell)
             sheet.append(row)
     if scan_report is not None:
