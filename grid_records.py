@@ -228,7 +228,9 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
     folder_numbers = {folder: number for number, folder in enumerate(
         dict.fromkeys(image.parent for image, _ in scans), 1
     )}
-    workers = min(4, max(1, len(scans)))
+    import os as _os
+    cpu = _os.cpu_count() or 4
+    workers = min(max(cpu, 8), max(1, len(scans)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for number, (matched, unmatched, gaps, text, error) in enumerate(pool.map(recognize, scans), 1):
             image = scans[number - 1][0]
@@ -245,12 +247,12 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
             records.extend({**row, "Image Name": str(number)} for row in page_records)
             source = f"{folder_numbers[image.parent]:03d}_{image.parent.name}/{image.name}"
             if ocr_only:
-                scan_ocr.append((number, source, unmatched, text, error))
+                scan_ocr.append((number, source, [str(u) for u in unmatched if u is not None], text, error))
             else:
                 status = error or ("No record IDs matched" if not matched else "Check against the page")
                 if gaps:
-                    status += ". Check ID gaps: " + ", ".join(gaps)
-                report.append([number, source, len(matched), ", ".join(unmatched), status])
+                    status += ". Check ID gaps: " + ", ".join(str(g) for g in gaps if g is not None)
+                report.append([number, source, len(matched), ", ".join(str(u) for u in unmatched if u is not None), status])
                 flagged += bool(error or not matched or unmatched or gaps)
             progress(number)
     if ocr_only:

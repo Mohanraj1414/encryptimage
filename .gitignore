@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 
 /KYC_MI_Source.xlsx
+/.archify/
+/build/
+/dist/
