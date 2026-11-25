@@ -8,6 +8,7 @@ from openpyxl import Workbook, load_workbook
 from PIL import Image, ImageDraw
 
 import app
+from center_codes import restore_center_codes
 from grid_records import MI_FIELDS, MI_HEADERS, canonical_id, export_grid, match_ids
 from kyc import FIELDS
 
@@ -224,6 +225,44 @@ class GridExportTests(unittest.TestCase):
         self.assertGreaterEqual(sheet.column_dimensions["O"].width, 42)
         self.assertEqual((sheet["T2"].value, sheet["U2"].value, sheet["U3"].value),
                          ("SYNTHETIC CENTER", "AB Y CD ef yZ", "N.A"))
+
+    def test_center_code_requires_agreement_on_position_and_case(self):
+        record = {"Record No": "HnT_DuP-AkyZ-2001", "Center Code": "abcD1234Efgh56jk MN78opQR90st"}
+        lower = "abcD1234Efgh56jkyMN78opQR90st"
+        upper = "abcD1234Efgh56jkYMN78opQR90st"
+        for readings in ([lower], [lower, upper], [lower, lower + " Y", upper]):
+            self.assertEqual(restore_center_codes([record], readings), [record])
+        other_character = lower.replace("1234", "1238")
+        self.assertEqual(restore_center_codes([record], [other_character] * 3), [record])
+        self.assertEqual(
+            restore_center_codes([record], ["VERIFIED YES " + lower, "abcD1234Efgh56jky MN78opQR90st"]),
+            [{**record, "Center Code": lower}],
+        )
+        standalone = record["Center Code"].replace(" ", " Y ")
+        self.assertEqual(restore_center_codes([record], [standalone] * 2), [record])
+
+    def test_grid_export_restores_confirmed_y_and_preserves_source_fields(self):
+        source = self.make_source(self.app_dir / "KYC_MI_Source.xlsx")
+        workbook = load_workbook(source)
+        workbook.active["U2"] = "abcD1234Efgh56jk MN78opQR90st"
+        workbook.save(source)
+        workbook.close()
+        output = self.root / "center.xlsx"
+        reading = "abcD1234Efgh56jkYMN78opQR90st"
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.windows_ocr_path", return_value=None),
+            patch("grid_records.scan_bytes", return_value=b"page"),
+            patch("grid_records.grid_id_images", return_value=[]),
+            patch("grid_records.grid_center_images", return_value=[b"center-a", b"center-b"]),
+            patch("grid_records.ocr_text", side_effect=["HnT_DuP-AkyZ-2001", reading, reading]),
+        ):
+            self.assertEqual(export_grid(output, [(self.scan, None)], source, Mock()), (1, 0))
+        result = load_workbook(output, read_only=True)
+        self.addCleanup(result.close)
+        _, row = result["KYC Data"].values
+        self.assertEqual((row[0], row[1], row[4], row[20]),
+                         ("HnT_DuP-AkyZ-2001", "Test Account", "Synthetic Person", reading))
 
     def test_export_interleaves_numbered_grid_columns_and_keeps_image_number(self):
         output = self.root / "KYC_Recovered.xlsx"

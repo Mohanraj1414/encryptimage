@@ -66,6 +66,16 @@ def run_windows_ocr(executable, payload):
     )
 
 
+def windows_ocr_path():
+    if os.name == "nt":
+        powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / (
+            "System32/WindowsPowerShell/v1.0/powershell.exe"
+        )
+        if powershell.is_file():
+            return str(powershell)
+    return None
+
+
 def find_ocr_engine():
     executable = shutil.which("tesseract")
     if executable:
@@ -77,17 +87,15 @@ def find_ocr_engine():
             if candidate.is_file():
                 return str(candidate)
     if os.name == "nt":
-        powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / (
-            "System32/WindowsPowerShell/v1.0/powershell.exe"
-        )
-        if powershell.is_file():
+        powershell = windows_ocr_path()
+        if powershell:
             try:
-                result = run_windows_ocr(str(powershell), b"")
+                result = run_windows_ocr(powershell, b"")
             except (OSError, subprocess.TimeoutExpired):
                 pass
             else:
                 if result.returncode == 0:
-                    return str(powershell)
+                    return powershell
         raise ValueError("Windows OCR is unavailable. Enable a Windows OCR language or install Tesseract.")
     raise ValueError("Install local Tesseract OCR to read record IDs from the decrypted images.")
 

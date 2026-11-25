@@ -9,11 +9,12 @@ from zipfile import BadZipFile
 
 from openpyxl import load_workbook
 from openpyxl.utils.exceptions import InvalidFileException
-from PIL import Image
+from PIL import Image, ImageOps
 
+from center_codes import is_center_code, restore_center_codes
 from image_reader import open_image, scan_bytes
 from kyc import FIELDS, MISSING, export, normalize
-from scan_ocr import ocr_text, tesseract_path
+from scan_ocr import ocr_text, tesseract_path, windows_ocr_path
 
 MI_HEADERS = ("ID", *range(1, 17), 18, 19, 20, 21)
 MI_FIELDS = FIELDS[:3] + FIELDS[4:-1]
@@ -65,20 +66,20 @@ def record_order(key):
     return family, int(key[len(family):])
 
 
-def grid_id_images(payload):
-    """Build two OCR views of cell headers on a ruled, two-column scan."""
+def ruled_grid(payload):
+    """Return the grayscale image, column starts, and row boundaries."""
     try:
         with open_image(BytesIO(payload)) as image:
             gray = image.convert("L")
     except (OSError, Image.DecompressionBombError):
-        return ()
+        return None
     width, height = gray.size
     mask = gray.point(lambda shade: 255 if shade < 155 else 0)
     vertical = mask.resize((width, 1), Image.Resampling.BOX)
     left = [x for x in range(width // 8) if vertical.getpixel((x, 0)) >= 163]
     middle = [x for x in range(width * 2 // 5, width * 3 // 5) if vertical.getpixel((x, 0)) >= 163]
     if not left or not middle:
-        return ()
+        return None
     horizontal = mask.resize((1, height), Image.Resampling.BOX)
     rules = []
     for y in range(height):
@@ -88,10 +89,26 @@ def grid_id_images(payload):
             else:
                 rules.append(y)
     if not 5 <= len(rules) <= 24:
-        return ()
+        return None
+    return gray, (left[-1] + 2, middle[-1] + 2), list(zip(rules, rules[1:]))
 
-    columns = (left[-1] + 2, middle[-1] + 2)
-    starts = list(zip(rules, rules[1:]))
+
+def ocr_png(sheet, scale):
+    with BytesIO() as buffer:
+        scale = min(scale, 2400 / max(sheet.size))
+        size = tuple(round(length * scale) for length in sheet.size)
+        with sheet.resize(size, Image.Resampling.LANCZOS) as expanded:
+            expanded.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+
+def grid_id_images(payload):
+    """Build two OCR views of cell headers on a ruled, two-column scan."""
+    grid = ruled_grid(payload)
+    if grid is None:
+        return ()
+    gray, columns, starts = grid
+    width = gray.width
     views = []
     for width_ratio, height_ratio in ((.135, .0154), (.147, .0188)):
         strip_width = max(1, round(width * width_ratio))
@@ -105,13 +122,30 @@ def grid_id_images(payload):
                     if end > start:
                         with gray.crop((x, start, x + strip_width, end)) as strip:
                             sheet.paste(strip, (12, 6 + (2 * row + column) * step))
-            with BytesIO() as buffer:
-                scale = min(2, 2400 / max(sheet.size))
-                size = tuple(round(length * scale) for length in sheet.size)
-                with sheet.resize(size, Image.Resampling.LANCZOS) as expanded:
-                    expanded.save(buffer, format="PNG")
-                views.append(buffer.getvalue())
+            views.append(ocr_png(sheet, 2))
     return views
+
+
+def grid_center_images(payload):
+    """Build OCR views of the bottom lines of each two-column record cell."""
+    grid = ruled_grid(payload)
+    if grid is None:
+        return
+    gray, columns, bands = grid
+    width = columns[1] - columns[0] - 16
+    for nominal_depth, scale, contrast in ((24, 2, False), (22, 3, True), (35, 2, False)):
+        depth = max(10, round(nominal_depth * gray.width / 1170))
+        step = depth + 8
+        with Image.new("L", (width + 28, (len(bands) + 1) * 2 * step), 255) as sheet:
+            for row, (top, bottom) in enumerate(bands):
+                start = max(top + 2, bottom - depth)
+                if start >= bottom - 1:
+                    continue
+                for column, x in enumerate(columns):
+                    with gray.crop((x, start, x + width, bottom - 1)) as strip:
+                        sheet.paste(ImageOps.autocontrast(strip) if contrast else strip,
+                                    (10, (row * 2 + column) * step))
+            yield ocr_png(sheet, scale)
 
 
 def match_ids(text, index):
@@ -199,6 +233,7 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
     prior = load_prior_exports(path.parent, scans) if recover else {}
     ocr_only = mi_path is None and not recover
     executable = tesseract_path()
+    center_engine = windows_ocr_path() or executable
 
     def recognize(scan):
         image, key = scan
@@ -216,6 +251,18 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
                     continue
             page_index = prior.get((image.parent.name.casefold(), image.name.casefold()), {}) if recover else index
             matched, unmatched, gaps = match_ids("\n".join(id_text), page_index)
+            if any(is_center_code(record.get("Center Code")) for record in matched):
+                readings = []
+                for view in grid_center_images(payload):
+                    try:
+                        readings.append(ocr_text(center_engine, view, 6))
+                    except (OSError, ValueError, TimeoutExpired):
+                        if center_engine != executable:
+                            try:
+                                readings.append(ocr_text(executable, view, 6))
+                            except (OSError, ValueError, TimeoutExpired):
+                                continue
+                matched = restore_center_codes(matched, readings)
             return matched, unmatched, gaps, text, ""
         except (OSError, ValueError, TimeoutExpired) as error:
             return [], [], [], "", str(error)

@@ -13,7 +13,7 @@ Choose **Open image** for one scan or **Open folder** for a batch. To combine ba
 
 1. Open your encrypted JPG folder and check that the page preview is readable.
 2. Click **Export Excel**. The app finds a numbered **KYC MI** workbook automatically. When no MI workbook is available, it looks for earlier matched exports in **Downloads > KYC Exports** and recovers rows with the same scan folder name, filename and printed record ID. This step uses local Tesseract OCR or the installed Windows OCR language.
-3. The app reads printed record IDs and uses the matching MI rows to populate the 22 columns. On ruled two-column scans, a second OCR pass reads the ID area of both columns. Records follow each numbered grid row from left to right. Image Name holds the page number. **Scan review** lists unmatched IDs and flags gaps between detected numbers for comparison with the original pages.
+3. The app reads printed record IDs and uses the matching MI rows to populate the 22 columns. On ruled two-column scans, it reads the ID area of both columns and checks the Center Code against the printed lines. It restores a missing `Y` or `y` only when two OCR views agree on its position and case. Records follow each numbered grid row from left to right. Image Name holds the page number. **Scan review** lists unmatched IDs and flags gaps between detected numbers for comparison with the original pages.
 
 Use **File > Export OCR review...** to save raw OCR text and detected record IDs for troubleshooting. That workbook has **Scan review** and **Detected IDs** sheets.
 
