@@ -168,6 +168,7 @@ class Workbench:
         file_menu.add_command(label="Decrypt Images...", command=self.decrypt_images)
         file_menu.add_command(label="Export reviewed form rows", command=self.save_reviewed_rows)
         file_menu.add_command(label="Export OCR review...", command=self.export_ocr_review)
+        file_menu.add_command(label="Export Excel from scans only...", command=self.export_scans_only)
         file_menu.add_command(label="Change source workbook...", command=self.choose_mi)
         menu.add_cascade(label="File", menu=file_menu)
         root.configure(menu=menu)
@@ -615,8 +616,14 @@ class Workbench:
             return
         self.export_scan_batch(None)
 
-    def export_scan_batch(self, mi_path, *, recover=False):
-        ocr_only = mi_path is None and not recover
+    def export_scans_only(self):
+        if not self.images:
+            messagebox.showinfo("Export Excel", "Open an image or folder first.", parent=self.root)
+            return
+        self.export_scan_batch(None, scan_only=True)
+
+    def export_scan_batch(self, mi_path, *, recover=False, scan_only=False):
+        ocr_only = mi_path is None and not (recover or scan_only)
         title = "Export OCR review" if ocr_only else "Export Excel"
         try:
             destination = Path.home() / "Downloads" / "KYC Exports"
@@ -628,7 +635,7 @@ class Workbench:
         folders = {image.parent for image in self.images}
         batch_name = (self.images[0].parent.name or "Batch") if len(folders) == 1 else "Combined"
         prefix = "KYC" if mi_path is not None else "KYC_OCR"
-        if recover:
+        if recover or scan_only:
             prefix = "KYC_Recovered"
         filename = destination / f"{prefix}_{batch_name}_{datetime.now():%Y%m%d_%H%M%S_%f}.xlsx"
         scans = []
@@ -651,7 +658,7 @@ class Workbench:
         def run():
             try:
                 alternatives = []
-                if not ocr_only:
+                if not (ocr_only or scan_only):
                     possible = dict.fromkeys([
                         self.imported_workbook_path, app_mi_workbook_path(), *find_batch_mi_workbooks(self.images)
                     ])
@@ -660,6 +667,7 @@ class Workbench:
                     filename, scans, mi_path, lambda count: events.put(("progress", count)),
                     recover=recover, alternatives=alternatives, require_matches=not ocr_only,
                     page_progress=None if ocr_only else lambda count: events.put(("pages", count)),
+                    scan_only=scan_only,
                 )
                 events.put(("done", result))
             except Exception as error:

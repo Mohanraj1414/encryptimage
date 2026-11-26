@@ -57,7 +57,7 @@ def normalize_date(value):
     return prefix + normalized, valid_day and len(year) == 4
 
 
-def normalize(record):
+def normalize(record, *, scan_export=False):
     result = []
     issues = []
     for index, field in enumerate(FIELDS[:-1]):
@@ -96,6 +96,11 @@ def normalize(record):
         for name in invalid_contacts:
             issues.remove(name + " IS INVALID")
         issues.insert(position, " , ".join(invalid_contacts) + " ARE INVALID")
+    if scan_export:
+        issues = [
+            issue.replace("CONTACT NO_", "CONTACT NO ").replace(" , CONTACT NO ", ",CONTACT NO ")
+            for issue in issues
+        ]
     note = " ".join(str(record.get("Remark") or "").upper().split())
     if note.casefold() not in MISSING:
         issues.append(note)

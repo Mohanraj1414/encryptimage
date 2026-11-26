@@ -15,7 +15,7 @@ from center_codes import is_center_code, restore_center_codes
 from image_reader import open_image, scan_bytes
 from kyc import FIELDS, MISSING, export, normalize
 from scan_ocr import ocr_text, tesseract_path, windows_ocr_path
-from scan_records import OCR_REMARK, parse_scan_record
+from scan_records import OCR_REMARK, VERIFICATION, parse_scan_record
 
 MI_HEADERS = ("ID", *range(1, 17), 18, 19, 20, 21)
 MI_FIELDS = FIELDS[:3] + FIELDS[4:-1]
@@ -134,32 +134,97 @@ def grid_id_images(payload):
     return views
 
 
-def read_grid_cells(payload, scan_stem, executable):
+def cell_readings(gray, box, executable, scales):
+    with gray.crop(box) as cell, ImageOps.expand(cell, border=6, fill=255) as padded:
+        for scale in scales:
+            try:
+                yield ocr_text(executable, ocr_png(padded, scale), 6, preserve_spacing=True).strip()
+            except (OSError, ValueError, TimeoutExpired):
+                continue
+
+
+def grid_columns(gray, left, middle):
+    return ((left, middle - 3), (middle, min(gray.width, 2 * middle - left) - 3))
+
+
+def page_continuations(payload, executable, family):
+    grid = ruled_grid(payload)
+    if grid is None:
+        return ("", "")
+    gray, (left, middle), bands = grid
+    top, bottom = bands[0]
+    tails = []
+    for start, end in grid_columns(gray, left, middle):
+        readings = cell_readings(gray, (start, top + 2, end, bottom - 1), executable, (1.5, 2))
+        tail = ""
+        for text in readings:
+            header = CELL_ID.match(text)
+            if PRINTED_ID.match(text) or header and family and cell_family_matches(family.groups(), header.groups()[:3]):
+                break
+            if VERIFICATION.search(text):
+                tail = text
+                break
+        tails.append(tail)
+    return tails
+
+
+def phone_readings(record):
+    for field in ("Mobile Number", "Contact 1", "Contact 2"):
+        digits = re.sub(r"\D", "", record.get(field, ""))
+        if digits:
+            yield record["Record No"], field, digits
+
+
+def read_grid_cells(payload, scan_stem, executable, next_payload=None):
     grid = ruled_grid(payload)
     if grid is None:
         return
     gray, (left, middle), bands = grid
-    right = min(gray.width, middle + (middle - left))
     family = SCAN_FAMILY.fullmatch(scan_stem)
     pattern = CELL_ID if family else PRINTED_ID
-    for top, bottom in bands:
-        for start, end in ((left, middle - 3), (middle, right - 3)):
+    tails = None
+    for row, (top, bottom) in enumerate(bands):
+        for column, (start, end) in enumerate(grid_columns(gray, left, middle)):
             if bottom - top < 14 or end <= start:
                 continue
-            with gray.crop((start, top + 2, end, bottom - 1)) as cell:
-                with ImageOps.expand(cell, border=6, fill=255) as padded:
-                    for scale in (1.5, 2):
-                        try:
-                            text = ocr_text(executable, ocr_png(padded, scale), 6, preserve_spacing=True).strip()
-                        except (OSError, ValueError, TimeoutExpired):
-                            break
-                        match = pattern.match(text)
-                        if match and (not family or cell_family_matches(family.groups(), match.groups()[:3])):
-                            identifier = f"{family[1]}_{family[2]}-{family[3]}-{match[4]}" if family else match[0]
-                            record = parse_scan_record(identifier, text[match.end():].lstrip())
-                            if record:
-                                yield record
-                                break
+            candidates = []
+            for text in cell_readings(gray, (start, top + 2, end, bottom - 1), executable, (1.5, 2, 2.5, 3)):
+                match = pattern.match(text)
+                if not match or family and not cell_family_matches(family.groups(), match.groups()[:3]):
+                    continue
+                identifier = f"{family[1]}_{family[2]}-{family[3]}-{match[4]}" if family else match[0]
+                body = text[match.end():].lstrip()
+                if row == len(bands) - 1 and next_payload is not None and not VERIFICATION.search(body):
+                    if tails is None:
+                        tails = page_continuations(next_payload, executable, family)
+                    if tails[column]:
+                        body += "\n" + tails[column]
+                record = parse_scan_record(identifier, body)
+                if record:
+                    candidates.append(record)
+                    if len(record) == len(FIELDS) - 1 and any(
+                        candidate["Record No"] == identifier
+                        and list(phone_readings(candidate)) == list(phone_readings(record))
+                        for candidate in candidates[:-1]
+                    ):
+                        break
+            if candidates:
+                votes = Counter(candidate["Record No"] for candidate in candidates)
+                phones = Counter(phone for candidate in candidates for phone in phone_readings(candidate))
+                yield max(candidates, key=lambda candidate: (
+                    votes[candidate["Record No"]], len(candidate),
+                    sum(phones[phone] for phone in phone_readings(candidate)),
+                ))
+
+
+def consecutive_scans(current, following):
+    if following is None or current.parent != following.parent:
+        return False
+    first = SCAN_FAMILY.fullmatch(current.stem)
+    second = SCAN_FAMILY.fullmatch(following.stem)
+    return (first and second
+            and tuple(part.casefold() for part in first.groups()) == tuple(part.casefold() for part in second.groups())
+            and int(following.stem.rsplit("(", 1)[1][:-1]) == int(current.stem.rsplit("(", 1)[1][:-1]) + 1)
 
 
 def cell_family_matches(expected, observed):
@@ -338,9 +403,11 @@ def missing_mi_reason(folder, scans, recognized):
 
 
 def export_grid(path, scans, mi_path, progress, *, recover=False, alternatives=(),
-                require_matches=False, page_progress=None):
+                require_matches=False, page_progress=None, scan_only=False):
+    if scan_only:
+        mi_path, alternatives, require_matches = None, (), True
     index = load_mi(mi_path) if mi_path is not None else {}
-    ocr_only = mi_path is None and not recover
+    ocr_only = mi_path is None and not (recover or scan_only)
     executable = tesseract_path()
     center_engine = windows_ocr_path() or executable
 
@@ -363,7 +430,7 @@ def export_grid(path, scans, mi_path, progress, *, recover=False, alternatives=(
             return {}, "", str(error)
 
     def prepare_page(item):
-        (image, key), (found, text, error) = item
+        (image, key), (found, text, error), (following, next_key) = item
         from_prior = image.parent not in selected
         page_index = (
             prior.get((image.parent.name.casefold(), image.name.casefold()), {})
@@ -374,7 +441,13 @@ def export_grid(path, scans, mi_path, progress, *, recover=False, alternatives=(
         if require_matches and not ocr_only and not matched:
             try:
                 payload = scan_bytes(image, key)
-                for record in read_grid_cells(payload, image.stem, executable):
+                next_payload = None
+                if consecutive_scans(image, following) and not isinstance(next_key, ValueError):
+                    try:
+                        next_payload = scan_bytes(following, next_key)
+                    except (OSError, ValueError):
+                        pass
+                for record in read_grid_cells(payload, image.stem, executable, next_payload):
                     identifier = canonical_id(record["Record No"])
                     scan_records.setdefault(identifier, record)
             except (OSError, ValueError) as scan_error:
@@ -384,6 +457,11 @@ def export_grid(path, scans, mi_path, progress, *, recover=False, alternatives=(
             found = {**found, **{key: row["Record No"] for key, row in scan_records.items()}}
             matched, unmatched, gaps = match_detected_ids(found, page_index)
             scan_records = {key: row for key, row in scan_records.items() if key not in page_index}
+            if scan_records:
+                families = {record_order(key)[0] for key in scan_records}
+                unmatched = [value for key, value in found.items()
+                             if key not in page_index and key not in scan_records and record_order(key)[0] in families]
+                _, _, gaps = match_detected_ids(dict.fromkeys(scan_records), {})
         if any(is_center_code(record.get("Center Code")) for record in matched):
             readings = []
             try:
@@ -422,8 +500,9 @@ def export_grid(path, scans, mi_path, progress, *, recover=False, alternatives=(
             detected[scans[number - 1][0].parent].update(reading[0])
             progress(number)
         selected = select_batch_indexes(index, alternatives, detected) if not ocr_only else {}
-        prior = load_prior_exports(path.parent, scans) if not ocr_only and detected.keys() - selected.keys() else {}
-        results = pool.map(prepare_page, zip(scans, recognized))
+        prior = load_prior_exports(path.parent, scans) if not (scan_only or ocr_only) and detected.keys() - selected.keys() else {}
+        following_scans = [*scans[1:], (None, None)]
+        results = pool.map(prepare_page, zip(scans, recognized, following_scans))
         for number, (matched, unmatched, gaps, text, error, from_prior, scan_records) in enumerate(results, 1):
             image = scans[number - 1][0]
             matched_count += len(matched)
@@ -431,7 +510,7 @@ def export_grid(path, scans, mi_path, progress, *, recover=False, alternatives=(
             if not from_prior:
                 page_records = [dict(zip(FIELDS, normalize(row))) for row in page_records]
             if scan_records:
-                page_records.extend(dict(zip(FIELDS, normalize({**row, "Image Name": str(number)})))
+                page_records.extend(dict(zip(FIELDS, normalize({**row, "Image Name": str(number)}, scan_export=True)))
                                     for row in scan_records.values())
                 ocr_count += len(scan_records)
             if not ocr_only and not require_matches and (from_prior or not matched):
@@ -453,7 +532,7 @@ def export_grid(path, scans, mi_path, progress, *, recover=False, alternatives=(
                 if error:
                     status = error
                 if gaps:
-                    status += ". Check ID gaps: " + ", ".join(str(g) for g in gaps if g is not None)
+                    status = status.rstrip(".") + ". Check ID gaps: " + ", ".join(str(g) for g in gaps if g is not None)
                 report.append([number, source, len(matched), ", ".join(str(u) for u in unmatched if u is not None), status])
                 flagged += bool(error or not matched or unmatched or gaps)
             if page_progress is not None:

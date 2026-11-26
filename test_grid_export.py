@@ -10,10 +10,10 @@ from PIL import Image, ImageDraw
 import app
 from center_codes import restore_center_codes
 from grid_records import (
-    MI_FIELDS, MI_HEADERS, canonical_id, detect_ids, export_grid, match_ids, read_prior_export,
-    select_batch_indexes,
+    MI_FIELDS, MI_HEADERS, canonical_id, consecutive_scans, detect_ids, export_grid, match_ids, read_prior_export,
+    read_grid_cells, select_batch_indexes,
 )
-from kyc import FIELDS
+from kyc import FIELDS, normalize
 from scan_records import OCR_REMARK, parse_scan_record
 
 
@@ -347,6 +347,58 @@ class GridExportTests(unittest.TestCase):
         self.assertEqual(info["City/District/Town"], "Sampleton")
         self.assertEqual(info["Email"], "sam.mock#example.org")
         self.assertEqual(info["Center Code"], "aB34Yz78ZnmQWvRSTu56xYABC")
+
+    def test_scan_phones_keep_printed_digits_and_stop_at_field_boundaries(self):
+        record = parse_scan_record(
+            "FbK_BrT-NaY-7730",
+            "Example Bank (SBS) 42 Main Street\nSarah Doe    Robin Doe Friday03-04-1960 Female. USA "
+            "741 West Road   Sample   VA 12345 1-519-\n445-5264 7389 "
+            "sample@example.org.1-506-593-5269 736.310.8894 58040 VERIFIED YES Example",
+        )
+        row = dict(zip(FIELDS, normalize({**record, "Image Name": "1"}, scan_export=True)))
+        self.assertEqual(record["Mobile Number"], "1-519-445-5264 7389")
+        self.assertEqual(record["Email"], "sample@example.org")
+        self.assertEqual(record["Contact 1"], "1-506-593-5269")
+        self.assertEqual(record["Contact 2"], "736.310.8894 58040")
+        self.assertEqual(record["Gender"], "Female.")
+        self.assertEqual(row["Date Of Birth"], "Friday, 03/04/1960")
+        self.assertEqual(row["Contact 1"], "(150) 659-35269")
+        self.assertIn("MOBILE NUMBER IS INVALID", row["Remark"])
+        self.assertIn("CONTACT NO 2 IS INVALID", row["Remark"])
+
+    def test_scan_separates_joined_contacts_after_email(self):
+        record = parse_scan_record("FbK_BrT-NaY-7730",
+                                   "sample@example.org 725-227-6030547.536.1659 381 VERIFIED YES Example")
+        self.assertEqual(record["Contact 1"], "725-227-6030")
+        self.assertEqual(record["Contact 2"], "547.536.1659 381")
+
+    def test_scans_only_uses_the_production_excel_export(self):
+        workbench = Mock(images=[self.scan])
+        app.Workbench.export_scans_only(workbench)
+        workbench.export_scan_batch.assert_called_once_with(None, scan_only=True)
+
+    def test_grid_continuations_require_consecutive_filenames_in_the_same_folder(self):
+        first = self.scans / "FbK_BrT-NaY (22910).jpg"
+        second = self.scans / "FbK_BrT-NaY (22911).jpg"
+        self.assertTrue(consecutive_scans(first, second))
+        self.assertFalse(consecutive_scans(first, second.with_name("FbK_BrT-NaY (22912).jpg")))
+        self.assertFalse(consecutive_scans(first, second.with_name("HnT_DuP-AkyZ (22911).jpg")))
+        self.assertFalse(consecutive_scans(first, self.root / second.name))
+
+    def test_grid_chooses_id_agreed_by_multiple_readings(self):
+        record = " Example Bank (SBS) 42 Main Street"
+        with (
+            Image.new("L", (200, 100), 255) as gray,
+            patch("grid_records.ruled_grid", return_value=None) as grid,
+            patch("grid_records.cell_readings", return_value=[
+                "FbK_BrT-NaY-17345" + record,
+                "FbK_BrT-NaY-17346" + record,
+                "FbK_BrT-MaY-17346" + record,
+            ]),
+        ):
+            grid.return_value = (gray, (4, 100), [(4, 40)])
+            rows = list(read_grid_cells(b"", "FbK_BrT-NaY (23488)", "ocr"))
+        self.assertEqual([row["Record No"] for row in rows], ["FbK_BrT-NaY-17346"] * 2)
 
     def test_conflicting_nearby_mi_sources_require_an_explicit_choice(self):
         identifier = "FbK_BrT-NaY-7730"

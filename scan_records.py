@@ -19,7 +19,8 @@ WEEKDAY = r"(?:monday|tuesday|teusday|wednesday|wenesday|thursday|thrusday|frida
 DATE_DIGITS = r"(?:\d{8}|\d{1,2}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{2,4})(?!\d)"
 WEEKDAY_DOB = re.compile(rf"{WEEKDAY}\s*[,.-]?\s*{DATE_DIGITS}", re.IGNORECASE)
 DOB = re.compile(rf"(?<!\w)(?:[a-z]{{3,12}}day\s*[,.-]?\s*)?{DATE_DIGITS}", re.IGNORECASE)
-GENDER = re.compile(r"^[\s_]*(female|fimale|firmale|firnale|faimale|femail|male)\b[. ,]*", re.IGNORECASE)
+GENDER = re.compile(r"^[\s_]*(female\b\.?|fimale\b\.?|firmale\b\.?|firnale\b\.?|faimale\b\.?|"
+                    r"femail\b\.?|male\b\.?)[ ,]*", re.IGNORECASE)
 NATIONALITY = re.compile(
     r"^\s*((?:united|unitid|unlted|unitited)\s*states(?:\s+of\s+america)?|"
     r"american|u\.?s\.?a\.?)\b[. ,]*", re.IGNORECASE,
@@ -31,10 +32,18 @@ STATE_ZIP = re.compile(
 )
 EMAIL = re.compile(
     r"(?<![\w.-])[a-z0-9_%+-]+(?:\.[ \t]*[a-z0-9_%+-]+)*"
-    r"[ \t]*[@#][ \t]*[a-z0-9-]+(?:[ \t]*\.[ \t]*[a-z0-9-]+)*", re.IGNORECASE,
+    r"[ \t]*[@#][ \t]*[a-z0-9-]+"
+    r"(?:[ \t]*\.[ \t]*(?!\d{1,3}[-./]\s*\d)[a-z0-9-]+)*"
+    r"(?:\.{1,}(?=\s|$))?", re.IGNORECASE,
 )
-PHONE = re.compile(r"(?<!\d)(?:1[.-])?\(?\d{3}\)?[. -]+\d{3}[. -]+\s*\d{4}"
-                   r"(?!\d)(?:[ \t]+\d{3,5}(?!\d|[.-]\d))?")
+PHONE_SEPARATOR = r"(?:[ \t]*[-./][ \t]*|[ \t]+)"
+PHONE = re.compile(
+    rf"(?<![\w-])(?:(?:\d[ \t]*[-./][ \t]*)?\(?\d{{3}}\)?|1[-./]\d{{2}})"
+    rf"(?:{PHONE_SEPARATOR})?\d{{3}}(?:{PHONE_SEPARATOR})?\d{{2,6}}"
+    r"(?!\d)(?:[ \t]+\d{2,5}(?![ \t]*[-./][ \t]*\d|\d))?"
+    r"|(?<![\w.-])(?:\d{8,16}|N\.?A\.?|N/A)(?![\w.-])", re.IGNORECASE,
+)
+JOINED_CONTACTS = re.compile(r"(?<=\d{3}[-./]\d{4})(?=\d{3}[-./]\d{3}[-./]\d{2,6}(?!\d))")
 VERIFICATION = re.compile(r"\b(NOT\s+VERIFIED|VERIFIED|VERIFED|UNVERIFIED)\b", re.IGNORECASE)
 ID_VERIFICATION = re.compile(r"^\s*(YES|YESS|YAS|YYS|NO|N\s*/\s*A)\b", re.IGNORECASE)
 NAME_WORD = re.compile(r"[^\W\d_]+(?:[’'.-][^\W\d_]+)*\.?", re.UNICODE)
@@ -43,6 +52,12 @@ STREET_START = re.compile(r"^[\d$]+[ \t]*[a-z]", re.IGNORECASE)
 
 def clean_boundary(value):
     return value.strip(" \t\n\r=–—_")
+
+
+def read_phones(text):
+    words = " ".join(text.splitlines())
+    return [re.sub(r"(?<=\d)\s*([./-])\s*(?=\d)", r"\1", value)
+            for value in PHONE.findall(words)]
 
 
 def name_words(value):
@@ -138,6 +153,8 @@ def read_location(record, body):
 
 
 def center_code(text):
+    if text.strip().casefold() == "na/":
+        return text.strip()
     # Tesseract can render the printed uppercase Y as a yen sign.
     code = "".join(clean_boundary(text).strip(".,:").split()).replace("\u00a5", "Y")
     if is_center_code(code) and re.search(r"[A-Z]", code) and re.search(r"[a-z0-9]", code):
@@ -174,7 +191,8 @@ def parse_scan_record(identifier, body):
     dob = WEEKDAY_DOB.search(body) or DOB.search(body)
     if dob:
         read_account_and_names(record, body[:dob.start()])
-        record["Date Of Birth"] = re.sub(r"(?<=\d)\s*([-/.])\s*(?=\d)", r"\1", " ".join(dob[0].split()))
+        date_text = re.sub(r"(?<=[a-z])(?=\d)", " ", dob[0], flags=re.IGNORECASE)
+        record["Date Of Birth"] = re.sub(r"(?<=\d)\s*([-/.])\s*(?=\d)", r"\1", " ".join(date_text.split()))
         body = read_location(record, body[dob.end():])
     else:
         read_account_and_names(record, body.split("\n", 1)[0])
@@ -183,14 +201,14 @@ def parse_scan_record(identifier, body):
     if email:
         record["Email"] = "".join(email[0].split())
         if "Pin Code" in record:
-            mobile = PHONE.findall(" ".join(body[:email.start()].splitlines()))
+            mobile = read_phones(body[:email.start()])
             if len(mobile) == 1:
                 record["Mobile Number"] = mobile[0]
     verification = VERIFICATION.search(body, email.end() if email else 0)
     if verification:
         record["Address Verification"] = verification[0]
         if email:
-            contacts = PHONE.findall(" ".join(body[email.end():verification.start()].splitlines()))
+            contacts = read_phones(JOINED_CONTACTS.sub(" ", body[email.end():verification.start()]))
             if len(contacts) == 2:
                 record["Contact 1"], record["Contact 2"] = contacts
         read_center(record, body[verification.end():])
