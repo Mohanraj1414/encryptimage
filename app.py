@@ -659,6 +659,7 @@ class Workbench:
                 result = export_grid(
                     filename, scans, mi_path, lambda count: events.put(("progress", count)),
                     recover=recover, alternatives=alternatives, require_matches=not ocr_only,
+                    page_progress=None if ocr_only else lambda count: events.put(("pages", count)),
                 )
                 events.put(("done", result))
             except Exception as error:
@@ -671,11 +672,14 @@ class Workbench:
                 except Empty:
                     self.root.after(100, poll)
                     return
-                if kind == "progress":
+                if kind in {"progress", "pages"}:
                     progress.configure(value=value)
-                    status = f"Read record IDs on {value:,} of {len(scans):,} scans"
-                    if value == len(scans) and not ocr_only:
-                        status = "Checking MI matches and Center Codes"
+                    if kind == "progress":
+                        status = f"Read record IDs on {value:,} of {len(scans):,} scans"
+                        if value == len(scans) and not ocr_only:
+                            status = "Checking MI sources and starting scan recovery"
+                    else:
+                        status = f"Prepared Excel rows for {value:,} of {len(scans):,} scans"
                     batch_status.configure(text=status)
                     continue
                 dialog.destroy()
@@ -683,16 +687,13 @@ class Workbench:
                     messagebox.showerror(title, value)
                 else:
                     rows, flagged = value
-                    row_label = "OCR-detected record IDs" if ocr_only else "matched KYC rows"
-                    source_note = (
-                        "Rows marked REVIEW contain an OCR ID and still need source data.\n\n"
-                        if not ocr_only else ""
-                    )
+                    row_label = "OCR-detected record IDs" if ocr_only else "KYC rows with data"
+                    review_note = ("See Scan review for the OCR results." if ocr_only else
+                                   "Check Scan review and any KYC Data rows marked REVIEW against the images.")
                     messagebox.showinfo(
                         title,
                         f"Included all {len(scans):,} loaded scans in Scan review and saved {rows:,} {row_label}. "
-                        f"{flagged:,} scans need review.\n\nSaved to {filename}\n\n"
-                        f"{source_note}Check the Scan review sheet against the original images.",
+                        f"{flagged:,} scans need review.\n\nSaved to {filename}\n\n{review_note}",
                     )
                 return
 

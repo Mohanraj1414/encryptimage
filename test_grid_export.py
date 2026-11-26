@@ -9,8 +9,12 @@ from PIL import Image, ImageDraw
 
 import app
 from center_codes import restore_center_codes
-from grid_records import MI_FIELDS, MI_HEADERS, canonical_id, detect_ids, export_grid, match_ids, select_batch_indexes
+from grid_records import (
+    MI_FIELDS, MI_HEADERS, canonical_id, detect_ids, export_grid, match_ids, read_prior_export,
+    select_batch_indexes,
+)
 from kyc import FIELDS
+from scan_records import OCR_REMARK, parse_scan_record
 
 
 class GridExportTests(unittest.TestCase):
@@ -248,7 +252,7 @@ class GridExportTests(unittest.TestCase):
             patch("grid_records.scan_bytes", return_value=b""),
             patch("grid_records.ocr_text", return_value="FOR BiT-NaY-7781 FbK_BrT-NaY-7732 FbK_BrT-NaY-7730"),
         ):
-            with self.assertRaisesRegex(ValueError, "No MI source matched the printed ID FbK_BrT-NaY-7730"):
+            with self.assertRaisesRegex(ValueError, "No matching MI rows or readable record fields.*FbK_BrT-NaY"):
                 export_grid(output, [(scan, None)], source, Mock(), require_matches=True)
         self.assertFalse(output.exists())
 
@@ -261,9 +265,70 @@ class GridExportTests(unittest.TestCase):
             patch("grid_records.scan_bytes", return_value=b""),
             patch("grid_records.ocr_text", return_value="FOR BiT-NaY-7781"),
         ):
-            with self.assertRaisesRegex(ValueError, "expected prefix FbK_BrT-NaY could be read"):
+            with self.assertRaisesRegex(ValueError, "No matching MI rows or readable record fields.*FbK_BrT-NaY"):
                 export_grid(output, [(scan, None)], source, Mock(), require_matches=True)
         self.assertFalse(output.exists())
+
+    def test_export_reads_a_new_batch_from_scan_cells_when_the_saved_source_does_not_match(self):
+        source = self.make_source(self.root / "old.xlsx")
+        scan = self.scans / "FbK_BrT-NaY (22908).jpg"
+        output = self.root / "new.xlsx"
+        with Image.new("L", (1060, 550), 255) as page:
+            grid = ImageDraw.Draw(page)
+            for x in (20, 525, 1030):
+                grid.line((x, 20, x, 520), fill=0)
+            for y in (20, 145, 270, 395, 520):
+                grid.line((20, y, 1030, y), fill=0)
+            page.save(scan)
+
+        def read_text(engine, payload, mode, *, preserve_spacing=False):
+            if not preserve_spacing:
+                return "FOR BiT-NaY-7781"
+            return ("FbK_BrT-Ma\u00a5-7730 Example Bank (SBS) 432 Example Lane     Sam\n"
+                    "Doe     Robin Doe     Thursday,01221959     FEMALE\n"
+                    "UNITED STATES     117 River Road     EXAMPLE     MN 56560\n"
+                    "490-675-0932    sam@example.org    443-730-4904   419-620-1668 VERIFIED YES Example\n"
+                    "ABcdEF12mnOP34qrST56uvWXyZ\u00a578")
+
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.ocr_text", side_effect=read_text),
+        ):
+            result = export_grid(output, [(scan, None)], source, Mock(), require_matches=True)
+        self.assertEqual(result, (1, 1))
+        book = load_workbook(output, read_only=True)
+        self.addCleanup(book.close)
+        headers, row = book["KYC Data"].values
+        self.assertEqual(headers, FIELDS)
+        record = dict(zip(headers, row))
+        self.assertEqual(record["Record No"], "FbK_BrT-NaY-7730")
+        self.assertEqual(record["Image Name"], "1")
+        self.assertEqual(record["Full Name"], "Sam Doe")
+        self.assertEqual(record["Date Of Birth"], "Thursday, 01/22/1959")
+        self.assertEqual(record["Email"], "sam@example.org")
+        self.assertEqual(record["Center Code"], "ABcdEF12mnOP34qrST56uvWXyZY78")
+        self.assertIn(OCR_REMARK, record["Remark"])
+        _, review = book["Scan review"].values
+        self.assertEqual(review[2], 0)
+        self.assertIn("1 rows read by OCR", review[-1])
+
+    def test_ocr_rows_are_not_reused_as_mi_rows_on_a_page_with_verified_rows(self):
+        output = self.root / "KYC_images_20261126_100000_000001.xlsx"
+        verified = {"Record No": "HnT_DuP-AkyZ-2001", "Image Name": "1", "Full Name": "Verified"}
+        ocr = {**verified, "Record No": "HnT_DuP-AkyZ-2002", "Remark": OCR_REMARK}
+        app.export(output, [verified, ocr], [[1, f"001_images/{self.scan.name}", 1, "", "Review"]])
+        entries = read_prior_export(output, {("images", self.scan.name.casefold())})
+        self.assertEqual([key for _, key, _ in entries], ["hntdupakyz2001"])
+
+    def test_scan_parser_leaves_unseparated_fields_blank(self):
+        info = parse_scan_record(
+            "FbK_BrT-NaY-7730",
+            "Example Bank (SBS) 432 Example Lane Sam Doe Robin Doe Tuesday,01-22-1959"
+            " MALE AMERICAN sam@example.org 443-730-4904 VERIFIED YES Example\nNot A Center Code",
+        )
+        self.assertEqual(info["Email"], "sam@example.org")
+        for field in ("Full Name", "Father/Husband Name", "Contact 1", "Contact 2", "Center Code"):
+            self.assertNotIn(field, info)
 
     def test_conflicting_nearby_mi_sources_require_an_explicit_choice(self):
         identifier = "FbK_BrT-NaY-7730"

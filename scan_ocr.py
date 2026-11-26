@@ -103,14 +103,17 @@ def find_ocr_engine():
 tesseract_path = find_ocr_engine
 
 
-def ocr_text(executable, payload, page_mode):
+def ocr_text(executable, payload, page_mode, *, preserve_spacing=False):
     if Path(executable).name.casefold() == "powershell.exe":
         result = run_windows_ocr(executable, payload)
         if result.returncode:
             raise ValueError("Windows OCR could not read this image.")
         return result.stdout.decode("utf-8", errors="replace")
+    command = [executable, "stdin", "stdout", "--psm", str(page_mode)]
+    if preserve_spacing:
+        command.extend(["-c", "preserve_interword_spaces=1"])
     result = subprocess.run(
-        [executable, "stdin", "stdout", "--psm", str(page_mode)],
+        command,
         input=payload, capture_output=True, timeout=60,
         env={**os.environ, "OMP_THREAD_LIMIT": "1"},
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
