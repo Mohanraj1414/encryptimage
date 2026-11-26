@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 
 import app
 from center_codes import restore_center_codes
-from grid_records import MI_FIELDS, MI_HEADERS, canonical_id, export_grid, match_ids
+from grid_records import MI_FIELDS, MI_HEADERS, canonical_id, detect_ids, export_grid, match_ids, select_batch_indexes
 from kyc import FIELDS
 
 
@@ -30,10 +30,9 @@ class GridExportTests(unittest.TestCase):
             patcher.start()
             self.addCleanup(patcher.stop)
 
-    def make_source(self, path):
+    def make_source(self, path, identifier="HnT_DuP-AkyZ-2001", name="SYNTHETIC PERSON"):
         workbook = Workbook()
-        identifier = "HnT_DuP-AkyZ-2001"
-        record = {"Record No": identifier, "Type Of Account": "Test Account", "Full Name": "SYNTHETIC PERSON"}
+        record = {"Record No": identifier, "Type Of Account": "Test Account", "Full Name": name}
         workbook.active.append(MI_HEADERS)
         workbook.active.append([identifier, *(record.get(field) for field in MI_FIELDS)])
         workbook.save(path)
@@ -203,6 +202,61 @@ class GridExportTests(unittest.TestCase):
         self.assertEqual(matched, [])
         self.assertEqual(unmatched, ["DuP-Akyz-3971"])
         self.assertEqual(gaps, [])
+
+    def test_detects_new_id_families_without_a_prefix_list(self):
+        identifiers = ["FbK_BrT-NaY-7730", "QzP_AxW-TeZ-12345"]
+        matched, unmatched, gaps = match_ids(" ".join(identifiers), {})
+        self.assertEqual((matched, unmatched, gaps), ([], identifiers, []))
+        self.assertEqual(
+            detect_ids("QzP AxW TeZ 12345", "QzP_AxW-TeZ (22908)"),
+            {"qzpaxwtez12345": identifiers[1]},
+        )
+
+    def test_batch_selects_matching_mi_sources_and_exports_populated_rows(self):
+        old = self.make_source(self.root / "old.xlsx")
+        first_id = "FbK_BrT-NaY-7730"
+        second_id = "QzP_AxW-TeZ-12345"
+        batch_one = self.make_source(self.scans / "Records.xlsx", first_id, "FIRST PERSON")
+        batch_two = self.make_source(self.scans / "Second.xlsx", second_id, "SECOND PERSON")
+        next_scan = self.root / "second" / "scan.jpg"
+        output = self.root / "new.xlsx"
+        text = {self.scan: first_id, next_scan: second_id}
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.scan_bytes", side_effect=lambda path, key: text[path].encode()),
+            patch("grid_records.ocr_text", side_effect=lambda engine, raw, mode: raw.decode()),
+        ):
+            self.assertEqual(
+                export_grid(output, [(self.scan, None), (next_scan, None)], old, Mock(),
+                            alternatives=[batch_one, batch_two], require_matches=True),
+                (2, 0),
+            )
+        workbook = load_workbook(output, read_only=True)
+        self.addCleanup(workbook.close)
+        _, first, second = workbook["KYC Data"].values
+        self.assertEqual((first[:5], second[:5]), (
+            (first_id, "Test Account", "N.A", "1", "First Person"),
+            (second_id, "Test Account", "N.A", "2", "Second Person"),
+        ))
+
+    def test_missing_matching_mi_stops_without_saving_empty_excel(self):
+        source = self.make_source(self.root / "old.xlsx")
+        output = self.root / "new.xlsx"
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.scan_bytes", return_value=b""),
+            patch("grid_records.ocr_text", return_value="FbK_BrT-NaY-7730"),
+        ):
+            with self.assertRaisesRegex(ValueError, "No MI source matched the printed ID FbK_BrT-NaY-7730"):
+                export_grid(output, [(self.scan, None)], source, Mock(), require_matches=True)
+        self.assertFalse(output.exists())
+
+    def test_conflicting_nearby_mi_sources_require_an_explicit_choice(self):
+        identifier = "FbK_BrT-NaY-7730"
+        one = self.make_source(self.scans / "First.xlsx", identifier, "FIRST PERSON")
+        two = self.make_source(self.scans / "Second.xlsx", identifier, "SECOND PERSON")
+        with self.assertRaisesRegex(ValueError, "Several MI workbooks match"):
+            select_batch_indexes({}, [one, two], {self.scans: {canonical_id(identifier)}})
 
     def test_export_keeps_dob_and_email_in_their_cells_and_preserves_center_code(self):
         output = self.root / "fields.xlsx"

@@ -20,16 +20,19 @@ MI_HEADERS = ("ID", *range(1, 17), 18, 19, 20, 21)
 MI_FIELDS = FIELDS[:3] + FIELDS[4:-1]
 MATCHED_EXPORT = re.compile(r"KYC_.+_\d{8}_\d{6}_\d{6}\.xlsx", re.IGNORECASE)
 PRINTED_ID = re.compile(
-    r"(?<![a-z0-9])(?:fbt[\s_-]*xhu[\s_-]*ent|hnt[\s_-]*dup[\s_-]*akyz)"
+    r"(?<![a-z0-9])(?:fbt[\s_-]*xhu[\s_-]*ent|hnt[\s_-]*dup[\s_-]*akyz|"
+    r"[a-z]{3}\s*[_-][\s_-]*[a-z]{3}[\s_-]+[a-z]{3,4}|"
+    r"[a-z]{3}\s+[a-z]{3}\s*[_-][\s_-]*[a-z]{3,4})"
     r"[\s_-]+[0-9]+(?![a-z0-9])", re.IGNORECASE,
 )
 # OCR can lose the first segment in a two-column grid. The remaining
 # two segments still distinguish the supported record families.
 PARTIAL_ID = re.compile(
-    r"(?<![a-z0-9])(?P<family>dup[\s_-]*akyz|xhu[\s_-]*ent)[\s_-]+"
+    r"(?<![a-z0-9])(?P<family>dup[\s_-]*akyz|xhu[\s_-]*ent|brt[\s_-]*nay)[\s_-]+"
     r"(?P<number>[0-9]+)(?![a-z0-9])", re.IGNORECASE,
 )
-ID_PREFIX = {"dupakyz": "hnt", "xhuent": "fbt"}
+ID_PREFIX = {"dupakyz": "hnt", "xhuent": "fbt", "brtnay": "fbk"}
+SCAN_FAMILY = re.compile(r"([a-z]{3})[_-]([a-z]{3})[_-]([a-z]{3,4})\s*\(\d+\)", re.IGNORECASE)
 
 
 def canonical_id(value):
@@ -148,17 +151,33 @@ def grid_center_images(payload):
             yield ocr_png(sheet, scale)
 
 
-def match_ids(text, index):
+def detect_ids(text, scan_stem=""):
     found = {}
     text = " ".join(text.split())
     for match in PRINTED_ID.finditer(text):
         printed = match.group()
         found.setdefault(canonical_id(printed), printed)
+    family = SCAN_FAMILY.fullmatch(scan_stem)
+    if family:
+        # A scan filename supplies the letter pattern only. Its file number
+        # has no relation to the individual record numbers printed on the page.
+        pattern = r"(?<![a-z0-9])" + r"[\s_-]*".join(family.groups()) + r"[\s_-]+([0-9]+)(?![a-z0-9])"
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            printed = f"{family[1]}_{family[2]}-{family[3]}-{match[1]}"
+            found.setdefault(canonical_id(printed), printed)
     for match in PARTIAL_ID.finditer(PRINTED_ID.sub(" ", text)):
         family = canonical_id(match["family"])
         key = ID_PREFIX[family] + family + match["number"]
         found.setdefault(key, match.group())
 
+    return found
+
+
+def match_ids(text, index):
+    return match_detected_ids(detect_ids(text), index)
+
+
+def match_detected_ids(found, index):
     ordered = sorted(found, key=record_order)
     matched = [index[key] for key in ordered if key in index]
     unmatched = [found[key] for key in ordered if key not in index]
@@ -228,14 +247,45 @@ def load_prior_exports(folder, scans):
     return index
 
 
-def export_grid(path, scans, mi_path, progress, *, recover=False):
+def select_batch_indexes(preferred, alternatives, detected):
+    """Use the chosen MI source where it matches, then compare nearby sources by ID."""
+    selected = {folder: preferred for folder, identifiers in detected.items() if preferred.keys() & identifiers}
+    remaining = detected.keys() - selected.keys()
+    if not remaining:
+        return selected
+
+    needed = set().union(*(detected[folder] for folder in remaining))
+    if not needed:
+        return selected
+    indexes = []
+    for path in alternatives:
+        try:
+            index = load_mi(path)
+        except (OSError, ValueError, BadZipFile, InvalidFileException, KeyError, SyntaxError):
+            continue
+        indexes.append({key: index[key] for key in index.keys() & needed})
+    for folder in remaining:
+        candidates = [{key: index[key] for key in detected[folder] & index.keys()} for index in indexes]
+        largest = max(map(len, candidates), default=0)
+        if not largest:
+            continue
+        best = [candidate for candidate in candidates if len(candidate) == largest]
+        if any(candidate != best[0] for candidate in best[1:]):
+            raise ValueError(
+                f"Several MI workbooks match {folder.name} but contain different records. "
+                "Choose the correct one under File > Change source workbook."
+            )
+        selected[folder] = best[0]
+    return selected
+
+
+def export_grid(path, scans, mi_path, progress, *, recover=False, alternatives=(), require_matches=False):
     index = load_mi(mi_path) if mi_path is not None else {}
-    prior = load_prior_exports(path.parent, scans) if recover else {}
     ocr_only = mi_path is None and not recover
     executable = tesseract_path()
     center_engine = windows_ocr_path() or executable
 
-    def recognize(scan):
+    def recognize_ids(scan):
         image, key = scan
         try:
             if isinstance(key, ValueError):
@@ -249,23 +299,35 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
                 except (OSError, ValueError, TimeoutExpired):
                     # Preserve results from the original scan if a supplemental pass fails.
                     continue
-            page_index = prior.get((image.parent.name.casefold(), image.name.casefold()), {}) if recover else index
-            matched, unmatched, gaps = match_ids("\n".join(id_text), page_index)
-            if any(is_center_code(record.get("Center Code")) for record in matched):
-                readings = []
-                for view in grid_center_images(payload):
-                    try:
-                        readings.append(ocr_text(center_engine, view, 6))
-                    except (OSError, ValueError, TimeoutExpired):
-                        if center_engine != executable:
-                            try:
-                                readings.append(ocr_text(executable, view, 6))
-                            except (OSError, ValueError, TimeoutExpired):
-                                continue
-                matched = restore_center_codes(matched, readings)
-            return matched, unmatched, gaps, text, ""
+            return detect_ids("\n".join(id_text), image.stem), text, ""
         except (OSError, ValueError, TimeoutExpired) as error:
-            return [], [], [], "", str(error)
+            return {}, "", str(error)
+
+    def prepare_page(item):
+        (image, key), (found, text, error) = item
+        from_prior = image.parent not in selected
+        page_index = (
+            prior.get((image.parent.name.casefold(), image.name.casefold()), {})
+            if from_prior else selected[image.parent]
+        )
+        matched, unmatched, gaps = match_detected_ids(found, page_index)
+        if any(is_center_code(record.get("Center Code")) for record in matched):
+            readings = []
+            try:
+                payload = scan_bytes(image, key)
+            except (OSError, ValueError):
+                return matched, unmatched, gaps, text, error, from_prior
+            for view in grid_center_images(payload):
+                try:
+                    readings.append(ocr_text(center_engine, view, 6))
+                except (OSError, ValueError, TimeoutExpired):
+                    if center_engine != executable:
+                        try:
+                            readings.append(ocr_text(executable, view, 6))
+                        except (OSError, ValueError, TimeoutExpired):
+                            continue
+            matched = restore_center_codes(matched, readings)
+        return matched, unmatched, gaps, text, error, from_prior
 
     records = []
     report = []
@@ -279,13 +341,46 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
     cpu = _os.cpu_count() or 4
     workers = min(max(cpu, 8), max(1, len(scans)))
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        for number, (matched, unmatched, gaps, text, error) in enumerate(pool.map(recognize, scans), 1):
+        recognized = []
+        detected = {folder: set() for folder in folder_numbers}
+        for number, reading in enumerate(pool.map(recognize_ids, scans), 1):
+            recognized.append(reading)
+            detected[scans[number - 1][0].parent].update(reading[0])
+            progress(number)
+        selected = select_batch_indexes(index, alternatives, detected) if not ocr_only else {}
+        prior = load_prior_exports(path.parent, scans) if not ocr_only and detected.keys() - selected.keys() else {}
+        if require_matches:
+            supported = set(selected)
+            for (image, _), (found, _, _) in zip(scans, recognized):
+                if prior.get((image.parent.name.casefold(), image.name.casefold()), {}).keys() & found.keys():
+                    supported.add(image.parent)
+            for folder in detected.keys() - supported:
+                sample = next((
+                    identifier for (image, _), (found, _, _) in zip(scans, recognized)
+                    if image.parent == folder for identifier in found.values()
+                    if PRINTED_ID.fullmatch(identifier)
+                ), None)
+                reason = (
+                    f"No MI source matched the printed ID {sample} in {folder.name}. "
+                    "Choose a KYC MI workbook for this batch under File > Change source workbook."
+                    if sample else f"No printed record IDs could be read in {folder.name}. Check the source scans."
+                )
+                if not sample:
+                    read_error = next((
+                        error for (image, _), (_, _, error) in zip(scans, recognized)
+                        if image.parent == folder and error
+                    ), "")
+                    if read_error:
+                        reason += f" {read_error}"
+                raise ValueError(reason)
+        results = pool.map(prepare_page, zip(scans, recognized))
+        for number, (matched, unmatched, gaps, text, error, from_prior) in enumerate(results, 1):
             image = scans[number - 1][0]
             matched_count += len(matched)
             page_records = [{**row, "Image Name": str(number)} for row in matched]
-            if not recover:
+            if not from_prior:
                 page_records = [dict(zip(FIELDS, normalize(row))) for row in page_records]
-            if recover or (mi_path is not None and not matched):
+            if not ocr_only and (from_prior or not matched):
                 review_rows = [
                     {"Record No": identifier, "Image Name": str(number),
                      "Remark": "REVIEW: No source data for this record ID"}
@@ -305,7 +400,6 @@ def export_grid(path, scans, mi_path, progress, *, recover=False):
                     status += ". Check ID gaps: " + ", ".join(str(g) for g in gaps if g is not None)
                 report.append([number, source, len(matched), ", ".join(str(u) for u in unmatched if u is not None), status])
                 flagged += bool(error or not matched or unmatched or gaps)
-            progress(number)
     if ocr_only:
         export(path, None, scan_ocr=scan_ocr)
         return sum(len(row[2]) for row in scan_ocr), sum(

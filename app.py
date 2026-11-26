@@ -81,6 +81,11 @@ def validate_mi_headers(path):
         raise ValueError("The workbook is damaged or is not a readable Excel .xlsx file.") from error
 
 
+def app_mi_workbook_path():
+    app_file = sys.executable if getattr(sys, "frozen", False) else __file__
+    return Path(app_file).resolve().with_name("KYC_MI_Source.xlsx")
+
+
 def find_mi_workbook(images, imported_path, session_choice=None):
     def is_valid(path):
         try:
@@ -91,24 +96,33 @@ def find_mi_workbook(images, imported_path, session_choice=None):
 
     # An explicit menu choice is retained for this session if saving failed.
     saved_path = session_choice or read_mi_path()
-    app_file = sys.executable if getattr(sys, "frozen", False) else __file__
-    app_source = Path(app_file).resolve().with_name("KYC_MI_Source.xlsx")
-    for path in (saved_path, imported_path, app_source):
+    for path in (saved_path, imported_path, app_mi_workbook_path()):
         if path is not None and is_valid(path):
             return path
 
-    folders = {image.parent.resolve() for image in images}
+    candidates = find_batch_mi_workbooks(images)
+    # Let the exporter compare printed IDs when several sources are available.
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def find_batch_mi_workbooks(images):
+    parents = {image.parent.resolve() for image in images}
+    downloads = Path.home() / "Downloads"
+    folders = parents | {parent.parent for parent in parents} | {downloads}
     candidates = set()
-    for folder in folders | {folder.parent for folder in folders}:
+    for folder in folders:
         try:
-            for path in folder.iterdir():
-                name = path.stem.casefold()
-                if path.suffix.casefold() == ".xlsx" and "kyc" in name and "mi" in name and is_valid(path):
+            for path in folder.glob("*.xlsx"):
+                if folder == downloads and "mi" not in path.stem.casefold():
+                    continue
+                try:
+                    validate_mi_headers(path)
                     candidates.add(path.resolve())
+                except (OSError, ValueError):
+                    continue
         except OSError:
             continue
-    # Never silently choose between several plausible batch workbooks.
-    return next(iter(candidates)) if len(candidates) == 1 else None
+    return sorted(candidates)
 
 
 def scan_folder(folder):
@@ -636,8 +650,15 @@ class Workbench:
 
         def run():
             try:
+                alternatives = []
+                if not ocr_only:
+                    possible = dict.fromkeys([
+                        self.imported_workbook_path, app_mi_workbook_path(), *find_batch_mi_workbooks(self.images)
+                    ])
+                    alternatives = [path for path in possible if path is not None and path != mi_path]
                 result = export_grid(
-                    filename, scans, mi_path, lambda count: events.put(("progress", count)), recover=recover
+                    filename, scans, mi_path, lambda count: events.put(("progress", count)),
+                    recover=recover, alternatives=alternatives, require_matches=not ocr_only,
                 )
                 events.put(("done", result))
             except Exception as error:
@@ -652,22 +673,16 @@ class Workbench:
                     return
                 if kind == "progress":
                     progress.configure(value=value)
-                    batch_status.configure(text=f"Processed {value:,} of {len(scans):,} scans")
+                    status = f"Read record IDs on {value:,} of {len(scans):,} scans"
+                    if value == len(scans) and not ocr_only:
+                        status = "Checking MI matches and Center Codes"
+                    batch_status.configure(text=status)
                     continue
                 dialog.destroy()
                 if kind == "error":
                     messagebox.showerror(title, value)
                 else:
                     rows, flagged = value
-                    if not ocr_only and not rows:
-                        messagebox.showwarning(
-                            title,
-                            "No KYC records matched a verified source. Check Scan review and any rows marked "
-                            "REVIEW in KYC Data.\n\n"
-                            f"Workbook saved to {filename}",
-                            parent=self.root,
-                        )
-                        return
                     row_label = "OCR-detected record IDs" if ocr_only else "matched KYC rows"
                     source_note = (
                         "Rows marked REVIEW contain an OCR ID and still need source data.\n\n"
