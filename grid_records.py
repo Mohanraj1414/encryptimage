@@ -279,6 +279,36 @@ def select_batch_indexes(preferred, alternatives, detected):
     return selected
 
 
+def missing_mi_reason(folder, scans, recognized):
+    pages = [(image, found, error) for (image, _), (found, _, error) in zip(scans, recognized)
+             if image.parent == folder]
+    families = {}
+    for image, _, _ in pages:
+        match = SCAN_FAMILY.fullmatch(image.stem)
+        if match:
+            families["".join(match.groups()).casefold()] = f"{match[1]}_{match[2]}-{match[3]}"
+
+    sample = None
+    for _, found, _ in pages:
+        candidates = [key for key, printed in found.items() if
+                      (key.rstrip("0123456789") in families if families else PRINTED_ID.fullmatch(printed))]
+        if candidates:
+            sample = found[min(candidates, key=record_order)]
+            break
+    if sample:
+        return (
+            f"No MI source matched the printed ID {sample} in {folder.name}. "
+            "Choose a KYC MI workbook for this batch under File > Change source workbook."
+        )
+    if families:
+        expected = ", ".join(families.values())
+        reason = f"No record IDs with the expected prefix {expected} could be read in {folder.name}."
+    else:
+        reason = f"No printed record IDs could be read in {folder.name}."
+    first_error = next((error for _, _, error in pages if error), "")
+    return f"{reason} {first_error or 'Check the source scans.'}"
+
+
 def export_grid(path, scans, mi_path, progress, *, recover=False, alternatives=(), require_matches=False):
     index = load_mi(mi_path) if mi_path is not None else {}
     ocr_only = mi_path is None and not recover
@@ -355,24 +385,7 @@ def export_grid(path, scans, mi_path, progress, *, recover=False, alternatives=(
                 if prior.get((image.parent.name.casefold(), image.name.casefold()), {}).keys() & found.keys():
                     supported.add(image.parent)
             for folder in detected.keys() - supported:
-                sample = next((
-                    identifier for (image, _), (found, _, _) in zip(scans, recognized)
-                    if image.parent == folder for identifier in found.values()
-                    if PRINTED_ID.fullmatch(identifier)
-                ), None)
-                reason = (
-                    f"No MI source matched the printed ID {sample} in {folder.name}. "
-                    "Choose a KYC MI workbook for this batch under File > Change source workbook."
-                    if sample else f"No printed record IDs could be read in {folder.name}. Check the source scans."
-                )
-                if not sample:
-                    read_error = next((
-                        error for (image, _), (_, _, error) in zip(scans, recognized)
-                        if image.parent == folder and error
-                    ), "")
-                    if read_error:
-                        reason += f" {read_error}"
-                raise ValueError(reason)
+                raise ValueError(missing_mi_reason(folder, scans, recognized))
         results = pool.map(prepare_page, zip(scans, recognized))
         for number, (matched, unmatched, gaps, text, error, from_prior) in enumerate(results, 1):
             image = scans[number - 1][0]

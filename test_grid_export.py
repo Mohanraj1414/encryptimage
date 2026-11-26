@@ -242,13 +242,27 @@ class GridExportTests(unittest.TestCase):
     def test_missing_matching_mi_stops_without_saving_empty_excel(self):
         source = self.make_source(self.root / "old.xlsx")
         output = self.root / "new.xlsx"
+        scan = self.scans / "FbK_BrT-NaY (22908).jpg"
         with (
             patch("grid_records.tesseract_path", return_value="ocr"),
             patch("grid_records.scan_bytes", return_value=b""),
-            patch("grid_records.ocr_text", return_value="FbK_BrT-NaY-7730"),
+            patch("grid_records.ocr_text", return_value="FOR BiT-NaY-7781 FbK_BrT-NaY-7732 FbK_BrT-NaY-7730"),
         ):
             with self.assertRaisesRegex(ValueError, "No MI source matched the printed ID FbK_BrT-NaY-7730"):
-                export_grid(output, [(self.scan, None)], source, Mock(), require_matches=True)
+                export_grid(output, [(scan, None)], source, Mock(), require_matches=True)
+        self.assertFalse(output.exists())
+
+    def test_missing_mi_message_distinguishes_a_garbled_prefix(self):
+        scan = self.scans / "FbK_BrT-NaY (22908).jpg"
+        source = self.make_source(self.root / "old.xlsx")
+        output = self.root / "result.xlsx"
+        with (
+            patch("grid_records.tesseract_path", return_value="ocr"),
+            patch("grid_records.scan_bytes", return_value=b""),
+            patch("grid_records.ocr_text", return_value="FOR BiT-NaY-7781"),
+        ):
+            with self.assertRaisesRegex(ValueError, "expected prefix FbK_BrT-NaY could be read"):
+                export_grid(output, [(scan, None)], source, Mock(), require_matches=True)
         self.assertFalse(output.exists())
 
     def test_conflicting_nearby_mi_sources_require_an_explicit_choice(self):
