@@ -330,6 +330,24 @@ class GridExportTests(unittest.TestCase):
         for field in ("Full Name", "Father/Husband Name", "Contact 1", "Contact 2", "Center Code"):
             self.assertNotIn(field, info)
 
+    def test_scan_parser_recovers_wrapped_fields_and_keeps_invalid_printed_email(self):
+        info = parse_scan_record(
+            "FbK_BrT-NaY-7730",
+            "Credit Union (Sbs} 999 Example Road\n"
+            "samantha mock Robin SampleTUESDAY,09-22-\n"
+            "1959Male Unitid\nStates 456 Sample Lane    Sampleton    CA = 12345\n"
+            "500-123-4567 sam. mock#example. org 500-321-7654 500-789-0123\n"
+            "VERIFIED YES Example  aB34Yz78 ZnmQWvRSTu56x¥ABC",
+        )
+        self.assertEqual(info["Rag Address"], "999 Example Road")
+        self.assertEqual(info["Full Name"], "samantha mock")
+        self.assertEqual(info["Father/Husband Name"], "Robin Sample")
+        self.assertEqual(info["Date Of Birth"], "TUESDAY,09-22-1959")
+        self.assertEqual(info["Address"], "456 Sample Lane")
+        self.assertEqual(info["City/District/Town"], "Sampleton")
+        self.assertEqual(info["Email"], "sam.mock#example.org")
+        self.assertEqual(info["Center Code"], "aB34Yz78ZnmQWvRSTu56xYABC")
+
     def test_conflicting_nearby_mi_sources_require_an_explicit_choice(self):
         identifier = "FbK_BrT-NaY-7730"
         one = self.make_source(self.scans / "First.xlsx", identifier, "FIRST PERSON")
